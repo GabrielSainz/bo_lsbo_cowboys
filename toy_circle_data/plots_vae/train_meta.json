@@ -1,0 +1,15 @@
+{
+  "train_types": "0123",
+  "N_train": 8000,
+  "L": 40,
+  "latent_dim": 2,
+  "hidden": 512,
+  "enc_layers": 6,
+  "dec_layers": 6,
+  "dropout": 0.05,
+  "warmup_ae_epochs": 80,
+  "vae_epochs": 120,
+  "beta_max": 0.0005,
+  "free_bits": 0.0,
+  "seed": 0
+}

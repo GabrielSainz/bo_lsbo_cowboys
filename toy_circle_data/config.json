@@ -1,0 +1,17 @@
+{
+  "N": 8000,
+  "L": 40,
+  "seed": 0,
+  "step_size": 1.0,
+  "target_points": 320,
+  "radius_used": 6.372747421591187,
+  "type_meanings": {
+    "0": "circle-ish",
+    "1": "spiral-ish",
+    "2": "random-smooth",
+    "3": "zigzag"
+  },
+  "oracle": "f(x) = -chamfer(path, circle_target) - w_close*closure - w_smooth*roughness",
+  "w_close": 0.2,
+  "w_smooth": 0.05
+}
