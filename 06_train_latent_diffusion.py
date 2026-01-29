@@ -197,7 +197,11 @@ def ddpm_sample(model, betas, n_samples, device):
         # DDPM update
         if t > 0:
             noise = torch.randn_like(z)
-            sigma = torch.sqrt(betas_t[t])
+            ab_t   = abar[t]
+            ab_tm1 = abar[t-1]
+            beta_t = betas_t[t]
+            posterior_var = beta_t * (1 - ab_tm1) / (1 - ab_t)
+            sigma = torch.sqrt(torch.clamp(posterior_var, min=1e-20))
         else:
             noise = torch.zeros_like(z)
             sigma = 0.0
