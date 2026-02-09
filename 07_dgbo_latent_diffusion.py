@@ -6,7 +6,11 @@
 # - Guidance uses ∇_{z_t} log w_n(h_theta(z0_hat)) where w_n is PI or EI (default PI)
 #
 # Usage example:
-# python 07_dgbo_latent_diffusion.py --outdir toy_circle_data --n_steps 60 --n_init 15 --weight pi --xi 0.06 --guidance_scale 2.0 --guide_every 1 --n_cand 24 --tau_guidance 3
+# tau = 5.0
+# outdir="toy_circle_data"
+# plotroot="$outdir/plots_dgbo_tau${tau}"
+# mkdir -p "$plotroot"
+# python 07_dgbo_latent_diffusion.py --outdir toy_circle_data --n_steps 60 --n_init 24 --weight pi --xi 0.06 --guide_every 1 --n_cand 1 --tau_guidance 5 --clip_guidance 10 > toy_circle_data/plots_dgbo_tau5.0/log.log 2>&1
 #
 # Notes:
 # - This script implements analytic GP gradients for Matérn-5/2 ARD and uses sklearn only to fit kernel hyperparams.
@@ -272,6 +276,17 @@ def load_latent_diffusion(diff_path: str, device):
 # -------------------------
 # GP + Matérn-5/2 ARD kernel gradients (sequence space)
 # -------------------------
+from scipy.special import log_ndtr
+import numpy as np
+
+LOG_SQRT_2PI = 0.5*np.log(2*np.pi)
+
+def mills_ratio(u: float) -> float:
+    # phi(u)/Phi(u) computed stably as exp(logphi - logPhi)
+    logPhi = float(log_ndtr(u))                  # log Φ(u)
+    logphi = float(-0.5*u*u - LOG_SQRT_2PI)      # log φ(u)
+    return float(np.exp(logphi - logPhi))        # φ/Φ ~ |u| in the far tail
+
 def parse_kernel_params(gp):
     """
     Expect gp.kernel_ ≈ ConstantKernel * Matern(nu=2.5) + WhiteKernel
@@ -364,7 +379,7 @@ def gp_mu_sigma_and_grads(gp, x):
     if np.isscalar(y_mean): y_mean = float(y_mean)
     if np.isscalar(y_std):  y_std = float(y_std)
 
-    sigma_f2, ell, _sigma_n2 = parse_kernel_params(gp)
+    sigma_f2, ell, sigma_n2 = parse_kernel_params(gp)
 
     # k(x, X_train) and grad
     kvec, grad_k = matern52_ard_k_and_grad(np.asarray(x, dtype=np.float64), Xtr, sigma_f2, ell)  # (n,), (n,L)
@@ -377,7 +392,8 @@ def gp_mu_sigma_and_grads(gp, x):
 
     # posterior in normalized-y space
     mu_norm = float(kvec @ y_alpha)
-    var_norm = float(max(1e-12, sigma_f2 - (v @ v)))  # k(x,x)=sigma_f2 for stationary signal kernel
+    #var_norm = float(max(1e-12, sigma_f2 - (v @ v)))  # k(x,x)=sigma_f2 for stationary signal kernel
+    var_norm = float(max(1e-12, (sigma_f2 + sigma_n2) - (v @ v)))  # k(x,x)=sigma_f2 for stationary signal kernel
     sigma_norm = float(np.sqrt(var_norm))
 
     # gradients in normalized-y space
@@ -393,24 +409,42 @@ def gp_mu_sigma_and_grads(gp, x):
 
     return float(mu), float(max(sigma, 1e-12)), grad_mu.astype(np.float64), grad_sigma.astype(np.float64)
 
-def grad_log_weight_PI(gp, x, best_y, xi=0.06, eps=1e-12):
-    """
-    w(x) = PI(x) = Phi( (mu - best_y - xi)/sigma )
-    Return grad_x log w(x)
-    """
+
+#def grad_log_weight_PI(gp, x, best_y, xi=0.06, eps=1e-4):
+#    """
+#    w(x) = PI(x) = Phi( (mu - best_y - xi)/sigma )
+#    Return grad_x log w(x)
+#    """
+#    mu, sigma, grad_mu, grad_sigma = gp_mu_sigma_and_grads(gp, x)
+#    sigma = max(sigma, 1e-12)
+#    u = (mu - best_y - xi) / sigma
+#
+#    Phi = norm_cdf(u)
+#    phi = norm_pdf(u)
+#
+#    # grad u = (sigma*grad_mu - (mu-best_y-xi)*grad_sigma) / sigma^2
+#    num = sigma * grad_mu - (mu - best_y - xi) * grad_sigma
+#    grad_u = num / (sigma**2)
+#
+#    # grad log Phi(u) = (phi/Phi) * grad_u
+#    ratio = phi_over_Phi(float(u))
+#    print("u=", u, "sigma=", sigma, "||grad_mu||=", np.linalg.norm(grad_mu), "min_ell=", np.min(parse_kernel_params(gp)[1]))
+#    return (phi / max(Phi, eps)) * grad_u
+#    #return ratio * grad_u
+
+def grad_log_weight_PI(gp, x, best_y, xi=0.06):
     mu, sigma, grad_mu, grad_sigma = gp_mu_sigma_and_grads(gp, x)
-    sigma = max(sigma, 1e-10)
-    u = (mu - best_y - xi) / sigma
+    sigma = max(sigma, 1e-12)
+    imp = mu - best_y - xi
+    u = imp / sigma
 
-    Phi = norm_cdf(u)
-    phi = norm_pdf(u)
+    # grad u = (sigma*grad_mu - imp*grad_sigma) / sigma^2
+    grad_u = (sigma * grad_mu - imp * grad_sigma) / (sigma**2)
 
-    # grad u = (sigma*grad_mu - (mu-best_y-xi)*grad_sigma) / sigma^2
-    num = sigma * grad_mu - (mu - best_y - xi) * grad_sigma
-    grad_u = num / (sigma**2)
+    # grad log PI = (phi/Phi) * grad_u  (stable mills ratio)
+    print("u=", u, "sigma=", sigma, "||grad_mu||=", np.linalg.norm(grad_mu), "min_ell=", np.min(parse_kernel_params(gp)[1]))
+    return mills_ratio(u) * grad_u
 
-    # grad log Phi(u) = (phi/Phi) * grad_u
-    return (phi / max(Phi, eps)) * grad_u
 
 def expected_improvement(mu, sigma, best_y, xi=0.05):
     sigma = np.maximum(sigma, 1e-9)
@@ -451,7 +485,8 @@ def gp_acquisition(gp, x, best_y, acq="ei", xi=0.06):
         return mu
     elif acq == "pi":
         u = (mu - best_y - xi) / max(sigma, 1e-10)
-        return float(norm_cdf(u))
+        return float(log_ndtr(u))
+        #return float(norm_cdf(u))
     elif acq == "ei":
         return float(expected_improvement(np.array([mu]), np.array([sigma]), best_y=best_y, xi=xi)[0])
     else:
@@ -506,8 +541,10 @@ def guided_sample_latent_z0_norm(
 
         eps_use = eps_hat
 
+        ab = float(abar[t].item())
+        do_guide = (t % max(1, guide_every) == 0) and (ab > 1e-4) and (ab < 0.999)
         # guidance (every k steps)
-        if guidance_scale > 0.0 and (t % max(1, guide_every) == 0):
+        if guidance_scale > 0.0 and do_guide:
             ab = abar[t]
             sqrt_ab = torch.sqrt(ab)
             sqrt_1mab = torch.sqrt(1.0 - ab)
@@ -537,12 +574,23 @@ def guided_sample_latent_z0_norm(
 
             # vjp: J^T grad_x via scalar product
             scalar = (x_rad * grad_x_torch).sum()
+            if z0_hat_real.grad is not None:
+                z0_hat_real.grad.zero_()
             scalar.backward()
             grad_z0_real = z0_hat_real.grad.detach()  # (1,2)
 
 
             # map to grad w.r.t z_t_norm using ∂z0_real/∂z_t_norm ≈ diag(z_std)/sqrt(abar_t)
             grad_z_t = (z_std_t / torch.clamp(sqrt_ab, min=1e-12)) * grad_z0_real  # (1,2)
+
+            #=================== sanity check ===================
+            if t == int(0.2*T):  # print once per sample
+                # compute PI at current x_np
+                mu, sigma, *_ = gp_mu_sigma_and_grads(gp, x_np)
+                u = (mu - best_y - xi) / max(sigma, 1e-12)
+                PI = float(norm_cdf(u))
+                print(f"[GUIDE] t={t} PI={PI:.3e} ||grad_x||={np.linalg.norm(grad_x):.3e} ||grad_z||={float(torch.norm(grad_z_t)):.3e}")
+            #=====================================================
 
             # clip guidance (optional)
             if clip_guidance > 0.0:
@@ -566,6 +614,9 @@ def guided_sample_latent_z0_norm(
             noise = torch.zeros_like(z)
 
         mean = (1.0 / torch.sqrt(alpha)) * (z - (beta / torch.sqrt(torch.clamp(1.0 - ab, min=1e-12))) * eps_use)
+        ############################ Jus trying - remove
+        noise = torch.zeros_like(z)
+        ############################
         z = mean + sigma * noise
 
         if keep_traj and (t in {T-1, int(0.8*(T-1)), int(0.6*(T-1)), int(0.4*(T-1)), int(0.2*(T-1)), 0}):
@@ -701,27 +752,27 @@ def main():
     # surrogate + weights
     ap.add_argument("--weight", type=str, default="pi", choices=["pi", "ei"])
     ap.add_argument("--xi", type=float, default=0.06)
-    ap.add_argument("--select_acq", type=str, default="mu", choices=["mu", "pi", "ei"])
+    ap.add_argument("--select_acq", type=str, default="pi", choices=["mu", "pi", "ei"])
 
     # guided diffusion sampling
     ap.add_argument("--n_cand", type=int, default=24, help="batch of guided diffusion samples per BO iteration")
-    ap.add_argument("--guidance_scale", type=float, default=2.0)
-    ap.add_argument("--guide_every", type=int, default=5)
-    ap.add_argument("--clip_guidance", type=float, default=5.0, help="max norm of guidance grad in z_t (0 disables)")
+    ap.add_argument("--guidance_scale", type=float, default=1.0)
+    ap.add_argument("--guide_every", type=int, default=1)
+    ap.add_argument("--clip_guidance", type=float, default=0, help="max norm of guidance grad in z_t (0 disables)")
 
     # init mode
-    ap.add_argument("--init_mode", type=str, default="data", choices=["data", "vae_prior", "diffusion"],
+    ap.add_argument("--init_mode", type=str, default="diffusion", choices=["data", "vae_prior", "diffusion"],
                     help="how to create initial evaluated set")
 
     # GP fitting
-    ap.add_argument("--n_restarts", type=int, default=3)
+    ap.add_argument("--n_restarts", type=int, default=5)
     ap.add_argument("--max_train_gp", type=int, default=200, help="cap GP training set size (keeps kernel inversion stable)")
 
     # plotting
     ap.add_argument("--n_data_scatter", type=int, default=4000)
     ap.add_argument("--data_scatter_seed", type=int, default=0)
 
-    ap.add_argument("--z_box", type=float, default=3)
+    ap.add_argument("--z_box", type=float, default=6)
     ap.add_argument("--grid_res", type=int, default=140)
     ap.add_argument("--plot_acq", type=str, default="pi", choices=["mu","pi","ei"])
 
@@ -771,7 +822,9 @@ def main():
     # plotting dirs
     plot_root = os.path.join(outdir, f"plots_dgbo_tau{args.tau_guidance}")
     step_dir = os.path.join(plot_root, "steps")
+    grid_dir = os.path.join(plot_root, "grid")
     ensure_dir(step_dir)
+    ensure_dir(grid_dir)
 
     # background latent cloud (dataset)
     Z_data = encode_dataset_to_z(vae, X, device, n_points=args.n_data_scatter, seed=args.data_scatter_seed)
@@ -809,7 +862,7 @@ def main():
                 eps_model, vae, gp=None,  # unused when guidance_scale=0
                 betas=betas, z_mean=z_mean, z_std=z_std,
                 best_y=0.0, xi=args.xi, weight="pi",
-                guidance_scale=0.0, guide_every=999999, clip_guidance=0.0,
+                guidance_scale=0.0, guide_every=1, clip_guidance=0.0,
                 device=device, tau_guidance=args.tau_guidance, keep_traj=False
             )
             z0_real = (z0n.reshape(1,2) * z_std + z_mean).reshape(-1)
@@ -850,14 +903,15 @@ def main():
         # fit GP in sequence space with your kernel choice
         kernel_x = (
             ConstantKernel(1.0, (1e-3, 1e3))
-            * Matern(length_scale=np.ones(L), nu=2.5, length_scale_bounds=(1e-2, 1e2))
-            + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-6, 1e-1))
+            * Matern(length_scale=np.ones(L), nu=2.5, length_scale_bounds=(0.8, 20))
+            + WhiteKernel(noise_level=1e-4, noise_level_bounds=(1e-3, 1e-1))
         )
         gp = GaussianProcessRegressor(
             kernel=kernel_x,
             normalize_y=True,
             n_restarts_optimizer=args.n_restarts,
-            random_state=args.seed
+            random_state=args.seed, 
+            alpha = 1e-8
         )
         gp.fit(X_fit, y_fit)
 
@@ -878,7 +932,7 @@ def main():
             A = mu_g
             A_name = r"$\mu(x=h(z))$"
         elif args.plot_acq == "pi":
-            u = (mu_g - best_y - args.xi) / np.maximum(std_g, 1e-10)
+            u = (mu_g - best_y - args.xi) / np.maximum(std_g, 1e-12)
             A = norm_cdf(u)
             A_name = r"$\mathrm{PI}(x=h(z))$"
         else:  # "ei"
@@ -887,7 +941,23 @@ def main():
 
         A_grid = A.reshape(args.grid_res, args.grid_res)
 
+        #======================= plot grid =======================
+        fig = plt.figure(figsize=(5, 5))
 
+        # (1) Acquisition heatmap + overlays
+        ax1 = fig.add_subplot(1, 1, 1)
+        if A_grid is not None:
+            im = ax1.contourf(grid_x, grid_y, A_grid, levels=35)
+            plt.colorbar(im, ax=ax1, label=A_name)
+        
+        save_grid = os.path.join(grid_dir, f"step_{it:03d}.png")
+
+        plt.tight_layout()
+        plt.savefig(save_grid, dpi=170)
+        plt.close(fig)
+
+        #=======================================================
+        
         if it == 1 or it % 5 == 0:
             try:
                 sigma_f2, ell, sigma_n2 = parse_kernel_params(gp)
@@ -897,7 +967,7 @@ def main():
 
         # generate guided candidates (batch)
         cand_x = []
-        cand_zmu = []
+        cand_z = []
         cand_score = []
         one_traj = None
 
@@ -924,23 +994,31 @@ def main():
 
             z0_real = (z0n.reshape(1,2) * z_std + z_mean).reshape(-1)
             x = decode_z_to_x_radians(vae, z0_real, device)
-            zmu = encode_x_to_zmu(vae, x, device)
-
+            #x = decode_z_to_x_radians(vae, z0n, device)
+            
             s = gp_acquisition(gp, x, best_y=best_y, acq=args.select_acq, xi=args.xi)
+            print("logPI:", s, " PI:", float(np.exp(s)))
 
             cand_x.append(x)
-            cand_zmu.append(zmu)
+            cand_z.append(z0_real)
+            #cand_z.append(z0n)
             cand_score.append(s)
 
         cand_x = np.array(cand_x, dtype=np.float64)
-        cand_zmu = np.array(cand_zmu, dtype=np.float64)
+        cand_z = np.array(cand_z, dtype=np.float64)
         cand_score = np.array(cand_score, dtype=np.float64)
 
         # pick next candidate from batch
         j = int(np.argmax(cand_score))
         x_next = cand_x[j]
-        z_next = cand_zmu[j]
+        z_next = cand_z[j]
         y_next = float(oracle_f(x_next, target, step_size, w_close, w_smooth))
+
+        # ================== Sanity check: acquisition at z_next ==================
+        z_test = np.array([-2.0, 2.0])
+        x_test = decode_z_to_x_radians(vae, z_test, device)
+        print("PI_at(-2,2) via gp_acquisition:", gp_acquisition(gp, x_test, best_y, acq="pi", xi=args.xi))
+        # ======================================================
 
         # update
         X_obs = np.vstack([X_obs, x_next.reshape(1,-1)])
@@ -964,7 +1042,7 @@ def main():
             Z_data=Z_data,
             Z_obs=Z_obs,
             y_obs=y_obs,
-            Z_cand=cand_zmu,
+            Z_cand=cand_z,
             z_next=z_next,
             y_next=y_next,
             z_best=z_best,
@@ -973,7 +1051,7 @@ def main():
             step_size=step_size,
             best_so_far=best_so_far,
             grid_x=grid_x, grid_y=grid_y, A_grid=A_grid, A_name=A_name,
-            traj=one_traj
+            traj=None
         )
 
 

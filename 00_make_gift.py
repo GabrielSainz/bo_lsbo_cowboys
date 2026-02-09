@@ -1,4 +1,4 @@
-# python 00_make_gift.py --in_dir toy_circle_data/plots_lsbo2/bo_steps --out_gif toy_circle_data/plots_lsbo2/lsbo.gif --fps 4
+# python 00_make_gift.py --in_dir toy_circle_data/plots_cowboys_pcn_cowboys_tau05/steps --out_gif toy_circle_data/plots_cowboys_pcn_cowboys_tau05/cowboys.gif --fps 2
 
 import os, re, argparse
 import imageio.v2 as imageio
@@ -10,7 +10,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--in_dir", type=str, default="toy_circle_data/plots_lsbo/bo_steps")
     p.add_argument("--out_gif", type=str, default="toy_circle_data/plots_lsbo/lsbo.gif")
-    p.add_argument("--fps", type=int, default=6)
+    p.add_argument("--fps", type=int, default=10)
     args = p.parse_args()
 
     files = sorted([f for f in os.listdir(args.in_dir) if f.lower().endswith(".png")], key=natural_key)

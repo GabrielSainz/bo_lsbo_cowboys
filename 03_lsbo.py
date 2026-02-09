@@ -194,7 +194,7 @@ def expected_improvement(mu, sigma, best_y, xi=0.05):
 # =========================
 # Plotting
 # =========================
-def plot_step_2d(step_idx, save_path,
+def plot_step_2d(step_idx, save_path,Z_data,
                  grid_x, grid_y, EI_grid,
                  Z_obs, y_obs, z_next,
                  x_next, y_next,
@@ -206,6 +206,7 @@ def plot_step_2d(step_idx, save_path,
     ax1 = fig.add_subplot(1, 3, 1)
     im = ax1.contourf(grid_x, grid_y, EI_grid, levels=30)
     plt.colorbar(im, ax=ax1, label="EI")
+    ax1.scatter(Z_data[:,0], Z_data[:,1], s=8, alpha=0.12, linewidth=0.0, label="data (encoded)")
     ax1.scatter(Z_obs[:,0], Z_obs[:,1], c="white", s=40, edgecolor="black", label="evaluated z")
     ax1.scatter([z_next[0]], [z_next[1]], c="red", s=90, marker="*", label="next z")
     ax1.set_title(f"Step {step_idx}: EI in latent space")
@@ -434,6 +435,11 @@ def main():
     gen_dir = os.path.join(plot_root, "generated_datapoints")
     ensure_dir(gen_dir)
 
+    Z_data = encode_dataset_to_z(
+            vae, X, device,
+            n_points=args.n_data_scatter,
+            seed=args.data_scatter_seed
+        )
 
     # Choose init pool: use the VAE training types if present, else use all
     if train_types is not None:
@@ -558,6 +564,7 @@ def main():
             plot_step_2d(
                 step_idx=t,
                 save_path=save_path,
+                Z_data=Z_data,
                 grid_x=grid_x, grid_y=grid_y, EI_grid=EI_grid,
                 Z_obs=Z_obs, y_obs=y_obs, z_next=z_next,
                 x_next=x_next, y_next=y_next,
