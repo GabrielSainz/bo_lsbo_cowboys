@@ -533,8 +533,12 @@ def guided_sample_latent_z0_norm(
     # constants for guidance mapping
     z_mean_t = torch.tensor(z_mean, device=device, dtype=torch.float32)  # (1,2)
     z_std_t  = torch.tensor(z_std, device=device, dtype=torch.float32)   # (1,2)
+    
+    debug_every = 10          # print every N guided steps
+    log_every_step = True    # if True, prints a lot
 
     for t in reversed(range(T)):
+        print(f"Sampling t={t}/{T-1}...", end="\r")
         tt = torch.full((1,), t, device=device, dtype=torch.long)
         with torch.no_grad():
             eps_hat = eps_model(z, tt)  # (1,2)
@@ -543,6 +547,8 @@ def guided_sample_latent_z0_norm(
 
         ab = float(abar[t].item())
         do_guide = (t % max(1, guide_every) == 0) and (ab > 1e-4) and (ab < 0.999)
+        #do_guide = (t % max(1, guide_every) == 0) and (ab > 0.25) and (ab < 0.995)
+        print(f"t={t} abar={ab:,.4f} guide={do_guide} ", end="")
         # guidance (every k steps)
         if guidance_scale > 0.0 and do_guide:
             ab = abar[t]
@@ -569,8 +575,12 @@ def guided_sample_latent_z0_norm(
             else:
                 raise ValueError("weight must be 'pi' or 'ei'")
             
+            gx_norm_raw = float(np.linalg.norm(grad_x))
+
             grad_x = tau_guidance * grad_x
             grad_x_torch = torch.tensor(grad_x, device=device, dtype=torch.float32).view(1, -1)
+
+            gx_norm_tau = float(np.linalg.norm(grad_x))
 
             # vjp: J^T grad_x via scalar product
             scalar = (x_rad * grad_x_torch).sum()
@@ -578,7 +588,6 @@ def guided_sample_latent_z0_norm(
                 z0_hat_real.grad.zero_()
             scalar.backward()
             grad_z0_real = z0_hat_real.grad.detach()  # (1,2)
-
 
             # map to grad w.r.t z_t_norm using ∂z0_real/∂z_t_norm ≈ diag(z_std)/sqrt(abar_t)
             grad_z_t = (z_std_t / torch.clamp(sqrt_ab, min=1e-12)) * grad_z0_real  # (1,2)
@@ -589,16 +598,47 @@ def guided_sample_latent_z0_norm(
                 mu, sigma, *_ = gp_mu_sigma_and_grads(gp, x_np)
                 u = (mu - best_y - xi) / max(sigma, 1e-12)
                 PI = float(norm_cdf(u))
-                print(f"[GUIDE] t={t} PI={PI:.3e} ||grad_x||={np.linalg.norm(grad_x):.3e} ||grad_z||={float(torch.norm(grad_z_t)):.3e}")
+                #print(f"[GUIDE] t={t} PI={PI:,.4f} ||grad_x||={np.linalg.norm(grad_x):,.4f} ||grad_z||={float(torch.norm(grad_z_t)):,.4f}")
             #=====================================================
+
+            # ----- (B) grad_z_t norms: pre-clip + “no tau” -----
+            gnorm_pre = torch.norm(grad_z_t, dim=1, keepdim=True).clamp(min=1e-12)  # includes tau effect
+            # remove tau effect (since tau was a simple multiplier upstream)
+            gnorm_no_tau = gnorm_pre / max(abs(tau_guidance), 1e-12)
+
+            # ----- (C) clip: log scale + post-clip norm -----
+            clip_scale = torch.ones_like(gnorm_pre)
+            was_clipped = torch.zeros_like(gnorm_pre, dtype=torch.bool)
 
             # clip guidance (optional)
             if clip_guidance > 0.0:
-                gnorm = torch.norm(grad_z_t, dim=1, keepdim=True).clamp(min=1e-12)
-                grad_z_t = grad_z_t * torch.clamp(clip_guidance / gnorm, max=1.0)
+                #gnorm = torch.norm(grad_z_t, dim=1, keepdim=True).clamp(min=1e-12)
+                clip_scale = (clip_guidance / gnorm_pre).clamp(max=1.0)
+                was_clipped = (clip_scale < 1.0)
+                grad_z_t = grad_z_t * clip_scale
+                #grad_z_t = grad_z_t * torch.clamp(clip_guidance / gnorm, max=1.0)
+
+            gnorm_post = torch.norm(grad_z_t, dim=1, keepdim=True).clamp(min=1e-12)
+            # ----- (D) actual eps change magnitude (what you really inject) -----
+            delta_eps = guidance_scale * sqrt_1mab * grad_z_t
+            denorm = torch.norm(delta_eps, dim=1, keepdim=True).clamp(min=1e-12)
+
+            # ----- (E) print throttled -----
+            should_print = log_every_step or (t % debug_every == 0) or bool(was_clipped.item())
+            if should_print:
+                print(
+                    f"[GUIDE] t={t:4d} abar={float(ab.item()):.4f} "
+                    f"||gx|| raw={gx_norm_raw:,.4f} tau={gx_norm_tau:,.4f} "
+                    f"||gz|| no_tau={gnorm_no_tau.item():,.4f} pre={gnorm_pre.item():,.4f} "
+                    f"clip={clip_guidance:,.4f} scale={clip_scale.item():,.4f} clipped={bool(was_clipped.item())} "
+                    f"post={gnorm_post.item():,.4f} ||delta_eps||={denorm.item():,.4f}"
+                    f"||eps_hat||={torch.norm(eps_hat).item():,.4f}"
+                    f"||eps_use||={torch.norm(eps_hat - delta_eps).item():,.4f}"
+                    f"r_t = ||delta_eps|| / ||eps_hat|| = {torch.norm(delta_eps).item() / max(torch.norm(eps_hat).item(), 1e-12):,.4f}"
+                )
 
             # eps-guidance: eps_guided = eps - s * sqrt(1-abar_t) * grad
-            eps_use = eps_hat - guidance_scale * sqrt_1mab * grad_z_t
+            eps_use = eps_hat - delta_eps
 
         # DDPM posterior sampling (correct beta_tilde)
         beta = betas_t[t]
@@ -820,7 +860,9 @@ def main():
     assert X.shape[1] == L, f"Dataset L={X.shape[1]} but VAE expects L={L}"
 
     # plotting dirs
-    plot_root = os.path.join(outdir, f"plots_dgbo_tau{args.tau_guidance}")
+    plot_root = os.path.join(outdir, "03_dgbo_runs")
+    plot_root = os.path.join(plot_root, f"{args.tau_guidance}_gs{args.guidance_scale}_clip{args.clip_guidance}")
+    print("Plots will be saved to:", plot_root)
     step_dir = os.path.join(plot_root, "steps")
     grid_dir = os.path.join(plot_root, "grid")
     ensure_dir(step_dir)
@@ -883,6 +925,7 @@ def main():
     # DGBO iterations
     # -------------------------
     for it in range(1, args.n_steps + 1):
+        print(f"\n=== DGBO iteration {it}/{args.n_steps} ===")
         # cap training set size to keep GP stable
         if X_obs.shape[0] > args.max_train_gp:
             # keep best half + recent half
@@ -972,6 +1015,7 @@ def main():
         one_traj = None
 
         for k in range(args.n_cand):
+            print(f"====================== Sampling candidate {k+1}/{args.n_cand} via guided diffusion...", end="\r")
             z0n, traj = guided_sample_latent_z0_norm(
                 eps_model=eps_model,
                 vae=vae,
@@ -1015,9 +1059,9 @@ def main():
         y_next = float(oracle_f(x_next, target, step_size, w_close, w_smooth))
 
         # ================== Sanity check: acquisition at z_next ==================
-        z_test = np.array([-2.0, 2.0])
-        x_test = decode_z_to_x_radians(vae, z_test, device)
-        print("PI_at(-2,2) via gp_acquisition:", gp_acquisition(gp, x_test, best_y, acq="pi", xi=args.xi))
+        #z_test = np.array([-2.0, 2.0])
+        #x_test = decode_z_to_x_radians(vae, z_test, device)
+        #print("PI_at(-2,2) via gp_acquisition:", gp_acquisition(gp, x_test, best_y, acq="pi", xi=args.xi))
         # ======================================================
 
         # update

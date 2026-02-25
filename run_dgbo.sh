@@ -4,9 +4,12 @@
 # ./run_dgbo.sh
 set -euo pipefail
 
-tau="10.0"
+tau="1.0"
+guidance_scale="1.0"
+clip_guidance="5.0"
+
 outdir="toy_circle_data"
-plotroot="${outdir}/plots_dgbo_tau${tau}"
+plotroot="${outdir}/03_dgbo_runs/${tau}_gs${guidance_scale}_clip${clip_guidance}"
 mkdir -p "$plotroot"
 
 python -u 07_dgbo_latent_diffusion.py \
@@ -16,9 +19,10 @@ python -u 07_dgbo_latent_diffusion.py \
   --weight pi \
   --xi 0.06 \
   --guide_every 1 \
-  --n_cand 24 \
+  --n_cand 1 \
   --tau_guidance "$tau" \
-  --clip_guidance 30 \
+  --guidance_scale "$guidance_scale" \
+  --clip_guidance "$clip_guidance" \
   >  "${plotroot}/stdout.log" \
   2> "${plotroot}/stderr.log"
 
