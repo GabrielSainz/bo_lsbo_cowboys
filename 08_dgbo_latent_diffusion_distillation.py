@@ -621,12 +621,20 @@ def train_distill_critic(
     loss_fn = nn.MSELoss()
 
     n = z_t.shape[0]
-    gen = torch.Generator(device="cpu")
+    # Keep deterministic shuffling while supporting CUDA/MPS tensors.
+    # CUDA randperm requires a CUDA generator; for non-CUDA devices we generate
+    # on CPU and move indices to the target device.
+    perm_device = z_t.device
+    gen_device = perm_device if perm_device.type == "cuda" else torch.device("cpu")
+    gen = torch.Generator(device=gen_device)
     gen.manual_seed(int(seed))
     final_loss = np.nan
 
     for _ in range(max(1, int(epochs))):
-        perm = torch.randperm(n, generator=gen, device=z_t.device)
+        if gen_device == perm_device:
+            perm = torch.randperm(n, generator=gen, device=perm_device)
+        else:
+            perm = torch.randperm(n, generator=gen, device=gen_device).to(perm_device)
         epoch_loss = 0.0
         n_batches = 0
         for i in range(0, n, max(1, int(batch_size))):
