@@ -4,9 +4,9 @@
 # ./run_dgbo.sh
 set -euo pipefail
 
-tau="1.0"
-guidance_scale="1.0"
-clip_guidance="5.0"
+tau="5.0"
+guidance_scale="5.0"
+clip_guidance="10.0"
 
 outdir="toy_circle_data"
 plotroot="${outdir}/03_dgbo_runs/${tau}_gs${guidance_scale}_clip${clip_guidance}"
