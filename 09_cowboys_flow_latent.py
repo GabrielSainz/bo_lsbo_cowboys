@@ -23,11 +23,28 @@ from toy_common import (
 )
 
 
+def fs_path(path: str) -> str:
+    path = os.path.abspath(os.fspath(path))
+    if os.name != "nt":
+        return path
+    path = os.path.normpath(path)
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
+def save_figure(save_path: str, dpi: int):
+    ensure_dir(fs_path(os.path.dirname(save_path)))
+    plt.savefig(fs_path(save_path), dpi=dpi)
+
+
 def torch_load_compat(path: str, device):
     try:
-        return torch.load(path, map_location=device, weights_only=False)
+        return torch.load(fs_path(path), map_location=device, weights_only=False)
     except TypeError:
-        return torch.load(path, map_location=device)
+        return torch.load(fs_path(path), map_location=device)
 
 
 def load_vae_safe(vae_path: str, device):
@@ -262,7 +279,8 @@ def save_flow_checkpoint(path: str, flow, args, latent_dim: int, flow_loss_hist)
         "flow_depth": int(args.flow_depth),
         "flow_loss_last_hist": np.asarray(flow_loss_hist, dtype=np.float32),
     }
-    torch.save(ckpt, path)
+    ensure_dir(fs_path(os.path.dirname(path)))
+    torch.save(ckpt, fs_path(path))
 
 
 def load_flow_checkpoint(path: str, flow, device):
@@ -498,6 +516,24 @@ def latent_grid_acq_2d(vae, gp, best_y: float, args, zlim, device):
     return gx, gy, ag, title
 
 
+def resolve_latent_plot_limits(args, z_plot: np.ndarray):
+    if args.latent_xlim is not None and args.latent_ylim is not None:
+        return (
+            (float(args.latent_xlim[0]), float(args.latent_xlim[1])),
+            (float(args.latent_ylim[0]), float(args.latent_ylim[1])),
+        )
+
+    z_plot = np.asarray(z_plot, dtype=np.float64)
+    qx = np.quantile(z_plot[:, 0], [0.02, 0.98])
+    qy = np.quantile(z_plot[:, 1], [0.02, 0.98])
+    sx = float(qx[1] - qx[0])
+    sy = float(qy[1] - qy[0])
+    return (
+        (float(qx[0] - 0.15 * max(sx, 1e-3)), float(qx[1] + 0.15 * max(sx, 1e-3))),
+        (float(qy[0] - 0.15 * max(sy, 1e-3)), float(qy[1] + 0.15 * max(sy, 1e-3))),
+    )
+
+
 def plot_step(
     save_path,
     z_bg,
@@ -510,6 +546,7 @@ def plot_step(
     y_next,
     step_size,
     best_so_far,
+    zlim,
     gx,
     gy,
     a_grid,
@@ -522,14 +559,16 @@ def plot_step(
     plt.colorbar(im, ax=ax1, label=a_name)
     ax1.scatter(z_bg[:, 0], z_bg[:, 1], s=8, alpha=0.10, linewidth=0.0, label="data")
     ax1.scatter(z_obs[:, 0], z_obs[:, 1], c=y_obs, s=52, edgecolor="black", linewidth=0.35, label="evaluated")
-    if z_cand.shape[0] > 0:
-        ax1.scatter(z_cand[:, 0], z_cand[:, 1], s=22, alpha=0.75, marker="x", label="candidates")
+    #if z_cand.shape[0] > 0:
+    #    ax1.scatter(z_cand[:, 0], z_cand[:, 1], s=22, alpha=0.75, marker="x", label="candidates")
     ax1.scatter([z_best[0]], [z_best[1]], c="red", s=260, marker="*", edgecolor="black", linewidth=1.0, label="best")
     ax1.scatter([z_next[0]], [z_next[1]], c="yellow", s=150, marker="D", edgecolor="black", linewidth=1.0, label="next")
     ax1.set_title("VAE latent acquisition")
     ax1.set_xlabel("z1")
     ax1.set_ylabel("z2")
     ax1.set_aspect("equal", "box")
+    ax1.set_xlim(zlim[0])
+    ax1.set_ylim(zlim[1])
     ax1.legend(loc="best")
 
     ax2 = fig.add_subplot(1, 3, 2)
@@ -548,7 +587,7 @@ def plot_step(
     ax3.legend(loc="best")
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=170)
+    save_figure(save_path, dpi=170)
     plt.close(fig)
 
 
@@ -563,6 +602,7 @@ def plot_final(
     step_size,
     best_so_far,
     acc_hist,
+    zlim,
 ):
     fig = plt.figure(figsize=(16.0, 5.0))
 
@@ -575,6 +615,8 @@ def plot_final(
     ax1.set_xlabel("z1")
     ax1.set_ylabel("z2")
     ax1.set_aspect("equal", "box")
+    ax1.set_xlim(zlim[0])
+    ax1.set_ylim(zlim[1])
     ax1.legend(loc="best")
 
     ax2 = fig.add_subplot(1, 4, 2)
@@ -603,7 +645,7 @@ def plot_final(
     ax4.legend(h1 + h2, l1 + l2, loc="best")
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=180)
+    save_figure(save_path, dpi=180)
     plt.close(fig)
 
 
@@ -659,7 +701,7 @@ def plot_latent_flow_diag(
     ax2.legend(loc="best")
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=170)
+    save_figure(save_path, dpi=170)
     plt.close(fig)
 
 
@@ -682,7 +724,7 @@ def plot_flow_training_overview(save_path, flow_loss_last_hist, flow_loss_mean_h
     ax2.set_ylabel("-E_q log q")
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=170)
+    save_figure(save_path, dpi=170)
     plt.close(fig)
 
 
@@ -717,6 +759,12 @@ def validate_args(args):
             raise ValueError("The initialization mixture weights must sum to a positive value when --init_mode=mix.")
         if args.init_mix_flow > 0.0 and args.init_flow_train_steps <= 0:
             raise ValueError("--init_flow_train_steps must be > 0 when the mix includes flow samples.")
+    if (args.latent_xlim is None) != (args.latent_ylim is None):
+        raise ValueError("--latent_xlim and --latent_ylim must be provided together.")
+    if args.latent_xlim is not None and float(args.latent_xlim[0]) >= float(args.latent_xlim[1]):
+        raise ValueError("--latent_xlim must satisfy min < max.")
+    if args.latent_ylim is not None and float(args.latent_ylim[0]) >= float(args.latent_ylim[1]):
+        raise ValueError("--latent_ylim must satisfy min < max.")
     if args.weight == "ucb" and args.tilt_form == "power":
         raise ValueError("tilt_form='power' is not valid when --weight=ucb.")
 
@@ -872,6 +920,8 @@ def main():
     ap.add_argument("--init_mix_prior", type=float, default=0.2)
     ap.add_argument("--init_mix_local", type=float, default=0.1)
     ap.add_argument("--init_local_scale", type=float, default=0.2)
+    ap.add_argument("--latent_xlim", type=float, nargs=2, default=None)
+    ap.add_argument("--latent_ylim", type=float, nargs=2, default=None)
 
     ap.add_argument("--weight", type=str, default="pi", choices=["pi", "ei", "ucb"])
     ap.add_argument("--select_acq", type=str, default=None, choices=["pi", "ei", "ucb"])
@@ -945,14 +995,14 @@ def main():
     print("device:", device)
 
     data_npz = os.path.join(args.outdir, "data", "dataset.npz")
-    assert os.path.exists(data_npz), f"Missing {data_npz}"
-    data = np.load(data_npz, allow_pickle=True)
+    assert os.path.exists(fs_path(data_npz)), f"Missing {data_npz}"
+    data = np.load(fs_path(data_npz), allow_pickle=True)
     x_all = data["X"].astype(np.float64)
     target = data["target"].astype(np.float64)
     step_size, w_close, w_smooth = load_config(args.outdir)
 
     vae_ckpt = args.vae_ckpt or os.path.join(args.outdir, "models", "vae.pt")
-    assert os.path.exists(vae_ckpt), f"Missing VAE checkpoint at {vae_ckpt}"
+    assert os.path.exists(fs_path(vae_ckpt)), f"Missing VAE checkpoint at {vae_ckpt}"
     vae, seq_len, latent_dim, train_types = load_vae_safe(vae_ckpt, device)
     assert x_all.shape[1] == seq_len, f"Dataset length {x_all.shape[1]} != VAE length {seq_len}"
 
@@ -970,6 +1020,10 @@ def main():
         f"[INIT-PROPOSAL] mode={args.init_mode} | flow/prior/local=({args.init_mix_flow}, "
         f"{args.init_mix_prior}, {args.init_mix_local}) | init_local_scale={args.init_local_scale}"
     )
+    if args.latent_xlim is not None:
+        print(f"[LATENT-PLOT] using fixed box x={tuple(args.latent_xlim)} y={tuple(args.latent_ylim)}")
+    else:
+        print("[LATENT-PLOT] using adaptive quantile box")
 
     if args.plotroot is None:
         args.plotroot = os.path.join(
@@ -981,15 +1035,15 @@ def main():
     step_dir = os.path.join(plot_root, "steps")
     diag_dir = os.path.join(plot_root, "diagnostics")
     flow_dir = os.path.join(plot_root, "flow_ckpts")
-    ensure_dir(step_dir)
-    ensure_dir(diag_dir)
-    ensure_dir(flow_dir)
+    ensure_dir(fs_path(step_dir))
+    ensure_dir(fs_path(diag_dir))
+    ensure_dir(fs_path(flow_dir))
 
-    with open(os.path.join(plot_root, "run_config.json"), "w", encoding="utf-8") as f_cfg:
+    with open(fs_path(os.path.join(plot_root, "run_config.json")), "w", encoding="utf-8") as f_cfg:
         json.dump(vars(args), f_cfg, indent=2)
 
     flow = build_flow(args.flow_type, latent_dim, args.flow_hidden, args.flow_depth, device)
-    if args.flow_ckpt is not None and os.path.exists(args.flow_ckpt):
+    if args.flow_ckpt is not None and os.path.exists(fs_path(args.flow_ckpt)):
         load_flow_checkpoint(args.flow_ckpt, flow, device)
         print("[FLOW] warm-started from:", os.path.abspath(args.flow_ckpt))
 
@@ -1031,7 +1085,7 @@ def main():
 
     print("[INIT] best y:", float(np.max(y_obs)))
 
-    with open(metrics_path, "w", newline="", encoding="utf-8") as f_csv:
+    with open(fs_path(metrics_path), "w", newline="", encoding="utf-8") as f_csv:
         wr = csv.writer(f_csv)
         wr.writerow(
             [
@@ -1166,14 +1220,7 @@ def main():
                 )
 
             z_plot = np.vstack([z_bg, z_obs, z_cand]) if z_cand.shape[0] > 0 else np.vstack([z_bg, z_obs])
-            qx = np.quantile(z_plot[:, 0], [0.02, 0.98])
-            qy = np.quantile(z_plot[:, 1], [0.02, 0.98])
-            sx = float(qx[1] - qx[0])
-            sy = float(qy[1] - qy[0])
-            zlim = (
-                (float(qx[0] - 0.15 * max(sx, 1e-3)), float(qx[1] + 0.15 * max(sx, 1e-3))),
-                (float(qy[0] - 0.15 * max(sy, 1e-3)), float(qy[1] + 0.15 * max(sy, 1e-3))),
-            )
+            zlim = resolve_latent_plot_limits(args, z_plot)
             gx, gy, a_grid, a_name = latent_grid_acq_2d(vae, gp, best_y, args, zlim, device)
 
             best_idx_now = int(np.argmax(y_obs))
@@ -1191,6 +1238,7 @@ def main():
                 y_next=y_next,
                 step_size=step_size,
                 best_so_far=best_so_far,
+                zlim=zlim,
                 gx=gx,
                 gy=gy,
                 a_grid=a_grid,
@@ -1216,6 +1264,7 @@ def main():
     z_best = z_obs[best_idx]
     x_best = x_obs[best_idx]
     y_best = float(y_obs[best_idx])
+    zlim_final = resolve_latent_plot_limits(args, np.vstack([z_bg, z_obs]))
 
     final_png = os.path.join(plot_root, "final_summary_cowboys_flow_latent.png")
     plot_final(
@@ -1229,6 +1278,7 @@ def main():
         step_size=step_size,
         best_so_far=best_so_far,
         acc_hist=acc_hist,
+        zlim=zlim_final,
     )
 
     final_flow_ckpt = os.path.join(flow_dir, "flow_final.pt")
@@ -1236,7 +1286,7 @@ def main():
 
     trace_path = os.path.join(plot_root, "trace_cowboys_flow_latent.npz")
     np.savez_compressed(
-        trace_path,
+        fs_path(trace_path),
         z_obs=z_obs,
         x_obs=x_obs,
         y_obs=y_obs,
