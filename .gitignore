@@ -7,6 +7,7 @@ toy_circle_data/03_dgbo_reinforce/
 toy_circle_data/03_dgbo_runs/
 toy_circle_data/03_grid_dgbo_runs/
 toy_circle_data/04_dgbo_runs_distillation/
+toy_circle_data/09_cowboys_diffusion/
 toy_circle_data/plots/
 toy_circle_data/plots_cowboys_diffprior/
 toy_circle_data/plots_latent_diffusion/
