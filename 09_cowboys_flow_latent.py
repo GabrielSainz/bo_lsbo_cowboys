@@ -21,6 +21,7 @@ from toy_common import (
     set_seed,
     turtle_path,
 )
+from toy_diagnostics import ToyDiagnosticsLogger, latent_box_diversity_normalizer
 
 
 def fs_path(path: str) -> str:
@@ -970,6 +971,15 @@ def main():
     ap.add_argument("--n_data_scatter", type=int, default=6000)
     ap.add_argument("--n_flow_diag", type=int, default=800)
     ap.add_argument("--flow_entropy_samples", type=int, default=512)
+    ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
+                    help="Export non-invasive toy diagnostics JSON for post-processing.")
+    ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
+    ap.add_argument("--diagnostics_top_k", type=int, default=10)
+    ap.add_argument("--diagnostics_max_proposals", type=int, default=2000)
+    ap.add_argument("--diagnostics_z_box", type=float, default=6.0,
+                    help="Reference half-width for normalizing latent diversity diagnostics.")
+    ap.add_argument("--diagnostics_background_res", type=int, default=60,
+                    help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
     args = ap.parse_args()
 
     if args.select_acq is None:
@@ -1039,6 +1049,25 @@ def main():
     ensure_dir(fs_path(diag_dir))
     ensure_dir(fs_path(flow_dir))
 
+    diagnostics = None
+    if args.diagnostics:
+        diagnostics = ToyDiagnosticsLogger(
+            method="cowboys_flow_latent",
+            seed=args.seed,
+            problem="toy_circle_path",
+            config=vars(args),
+            results_root=args.diagnostics_root,
+            top_k=args.diagnostics_top_k,
+            max_proposals=args.diagnostics_max_proposals,
+            diversity_normalizer=latent_box_diversity_normalizer(args.diagnostics_z_box, latent_dim),
+            step_size=step_size,
+            target_path=target,
+            decode_latent_fn=lambda z: decode_batch_z_to_x(vae, np.asarray(z, dtype=np.float64).reshape(1, -1), device)[0],
+            objective_fn=lambda x: oracle_f(x, target, step_size, w_close, w_smooth),
+        )
+        if args.diagnostics_background_res > 1:
+            diagnostics.set_objective_background(args.diagnostics_z_box, args.diagnostics_background_res)
+
     with open(fs_path(os.path.join(plot_root, "run_config.json")), "w", encoding="utf-8") as f_cfg:
         json.dump(vars(args), f_cfg, indent=2)
 
@@ -1071,6 +1100,8 @@ def main():
     x_obs = x_init.copy()
     y_obs = y_init.copy()
     replay_buffer = np.zeros((0, latent_dim), dtype=np.float64)
+    if diagnostics is not None:
+        diagnostics.set_initial_observations(z_obs, y_obs, x_obs)
 
     best_so_far = [float(np.max(y_obs))]
     acc_hist = [np.nan]
@@ -1178,6 +1209,28 @@ def main():
 
             best_so_far.append(float(np.max(y_obs)))
             acc_hist.append(float(mh_stats["accept_rate"]))
+            if diagnostics is not None:
+                best_idx_diag = int(np.argmax(y_obs))
+                diagnostics.record_iteration(
+                    iteration=it,
+                    selected_latent=z_next,
+                    selected_objective=y_next,
+                    best_so_far_objective=float(y_obs[best_idx_diag]),
+                    incumbent_best_latent=z_obs[best_idx_diag],
+                    incumbent_best_objective=float(y_obs[best_idx_diag]),
+                    selected_sequence=x_next,
+                    incumbent_best_sequence=x_obs[best_idx_diag],
+                    proposal_latents=z_cand,
+                    proposal_acquisition_values=cand_util,
+                    proposal_sequences=x_cand,
+                    extra={
+                        "accept_rate": mh_stats["accept_rate"],
+                        "selection_acquisition": args.select_acq,
+                        "weight": args.weight,
+                        "flow_loss_last": flow_loss_last,
+                        "proposal_entropy_estimate": flow_entropy,
+                    },
+                )
 
             wr.writerow(
                 [
@@ -1297,6 +1350,17 @@ def main():
         entropy_hist=np.asarray(entropy_hist, dtype=np.float64),
         replay_size_hist=np.asarray(replay_size_hist, dtype=np.float64),
     )
+    if diagnostics is not None:
+        diagnostics_path = diagnostics.finalize(
+            extra_summary={
+                "best_objective": y_best,
+                "best_latent": z_best,
+                "trace_path": trace_path,
+                "plot_root": plot_root,
+                "metrics_csv": metrics_path,
+            }
+        )
+        print("Saved toy diagnostics:", os.path.abspath(diagnostics_path))
 
     print("\n=== COWBOYS latent-flow finished ===")
     print("Best oracle:", y_best)

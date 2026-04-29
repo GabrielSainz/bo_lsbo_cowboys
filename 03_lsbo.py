@@ -23,6 +23,7 @@ from toy_common import (
     set_seed,
     turtle_path,
 )
+from toy_diagnostics import ToyDiagnosticsLogger, latent_box_diversity_normalizer
 
 
 # =========================
@@ -182,6 +183,12 @@ def save_generated_datapoint(gen_dir, step_idx, z_next, x_next, y_next, step_siz
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", type=str, default="toy_circle_data")
+    ap.add_argument(
+        "--plotroot",
+        type=str,
+        default=None,
+        help="Where to save plots/traces. Supports {seed} and {method}; default is results/toy_runs/lsbo/seed_{seed}.",
+    )
     ap.add_argument("--vae_path", type=str, default=None)
 
     ap.add_argument("--seed", type=int, default=0)
@@ -201,6 +208,13 @@ def main():
     ap.add_argument("--data_scatter_seed", type=int, default=0)
 
     ap.add_argument("--cand_highd", type=int, default=4000)     # if latent_dim != 2
+    ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
+                    help="Export non-invasive toy diagnostics JSON for post-processing.")
+    ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
+    ap.add_argument("--diagnostics_top_k", type=int, default=10)
+    ap.add_argument("--diagnostics_max_proposals", type=int, default=2000)
+    ap.add_argument("--diagnostics_background_res", type=int, default=60,
+                    help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
     args = ap.parse_args()
 
     set_seed(args.seed)
@@ -237,8 +251,28 @@ def main():
 
     assert X.shape[1] == L, f"Dataset L={X.shape[1]} but VAE expects L={L}"
 
-    # Output dirs
-    plot_root = os.path.join(outdir, "plots_lsbo2")
+    diagnostics = None
+    if args.diagnostics:
+        diagnostics = ToyDiagnosticsLogger(
+            method="lsbo",
+            seed=args.seed,
+            problem="toy_circle_path",
+            config=vars(args),
+            results_root=args.diagnostics_root,
+            top_k=args.diagnostics_top_k,
+            max_proposals=args.diagnostics_max_proposals,
+            diversity_normalizer=latent_box_diversity_normalizer(args.z_box, latent_dim),
+            step_size=step_size,
+            target_path=target,
+            decode_latent_fn=lambda z: decode_z_to_delta_theta(vae, z, device),
+            objective_fn=lambda x: oracle_f(x, target, step_size, w_close, w_smooth),
+        )
+        if latent_dim == 2 and args.diagnostics_background_res > 1:
+            diagnostics.set_objective_background(args.z_box, args.diagnostics_background_res)
+
+    # Output dirs. Seed-aware by default so repeated runs do not overwrite each other.
+    plotroot_template = args.plotroot or os.path.join("results", "toy_runs", "lsbo", "seed_{seed}")
+    plot_root = plotroot_template.format(seed=args.seed, method="lsbo")
     step_dir = os.path.join(plot_root, "bo_steps")
     ensure_dir(plot_root)
     ensure_dir(step_dir)
@@ -288,6 +322,8 @@ def main():
 
     Z_obs = np.array(Z_obs, dtype=float)
     y_obs = np.array(y_obs, dtype=float)
+    if diagnostics is not None:
+        diagnostics.set_initial_observations(Z_obs, y_obs, np.asarray(x_obs, dtype=float))
 
     print("\n[INIT] best decoded y (reachable):", float(y_obs.max()))
     best_so_far = [float(y_obs.max())]
@@ -309,6 +345,8 @@ def main():
         gp.fit(Z_obs, y_obs)
 
         best_y = float(y_obs.max())
+        proposal_latents = None
+        proposal_acquisition_values = None
 
         # ---- Propose z_next
         if latent_dim == 2:
@@ -321,6 +359,8 @@ def main():
             mu, std = gp.predict(Z_grid, return_std=True)
             ei = expected_improvement(mu, std, best_y=best_y, xi=args.xi)
             EI_grid = ei.reshape(args.grid_res, args.grid_res)
+            proposal_latents = Z_grid
+            proposal_acquisition_values = ei
 
             # epsilon-greedy + top-k EI sampling
             if np.random.rand() < args.eps_random or np.std(ei) < 1e-12:
@@ -342,6 +382,8 @@ def main():
 
                 mu, std = gp.predict(Zcand, return_std=True)
                 ei = expected_improvement(mu, std, best_y=best_y, xi=args.xi)
+                proposal_latents = Zcand
+                proposal_acquisition_values = ei
                 z_next = Zcand[int(np.argmax(ei))]
 
             grid_x = grid_y = EI_grid = None  # no 2D plot
@@ -365,6 +407,21 @@ def main():
         x_obs.append(x_next)
 
         best_so_far.append(float(y_obs.max()))
+        if diagnostics is not None:
+            best_idx_diag = int(np.argmax(y_obs))
+            diagnostics.record_iteration(
+                iteration=t,
+                selected_latent=z_next,
+                selected_objective=float(y_next),
+                best_so_far_objective=float(y_obs[best_idx_diag]),
+                incumbent_best_latent=Z_obs[best_idx_diag],
+                incumbent_best_objective=float(y_obs[best_idx_diag]),
+                selected_sequence=x_next,
+                incumbent_best_sequence=np.asarray(x_obs[best_idx_diag], dtype=float),
+                proposal_latents=proposal_latents,
+                proposal_acquisition_values=proposal_acquisition_values,
+                extra={"selection_acquisition": "expected_improvement"},
+            )
 
         if t == 1 or t % 5 == 0:
             print(f"[BO] step {t:3d} | y_next={y_next: .4f} | best={float(y_obs.max()): .4f}")
@@ -415,6 +472,16 @@ def main():
         )
 
     print("Saved final summary:", os.path.abspath(final_png))
+    if diagnostics is not None:
+        diagnostics_path = diagnostics.finalize(
+            extra_summary={
+                "best_objective": y_best,
+                "best_latent": z_best,
+                "trace_path": trace_path,
+                "plot_root": plot_root,
+            }
+        )
+        print("Saved toy diagnostics:", os.path.abspath(diagnostics_path))
     print("\n=== LSBO finished ===")
     print("Best oracle:", y_best)
     print("Best z:", z_best)

@@ -45,6 +45,7 @@ from toy_common import (
     set_seed,
     turtle_path,
 )
+from toy_diagnostics import ToyDiagnosticsLogger, latent_box_diversity_normalizer
 
 # -------------------------
 # Latent diffusion model (must match your training)
@@ -952,6 +953,13 @@ def main():
     ap.add_argument("--plot_acq", type=str, default="pi", choices=["mu","pi","ei"])
 
     ap.add_argument("--tau_guidance", type=float, default=1.0)
+    ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
+                    help="Export non-invasive toy diagnostics JSON for post-processing.")
+    ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
+    ap.add_argument("--diagnostics_top_k", type=int, default=10)
+    ap.add_argument("--diagnostics_max_proposals", type=int, default=2000)
+    ap.add_argument("--diagnostics_background_res", type=int, default=60,
+                    help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
 
     ap.set_defaults(distill_warmstart=True, distill_target_clip=True)
     args = ap.parse_args()
@@ -989,6 +997,24 @@ def main():
     vae, L, z_dim, _train_types = load_vae(vae_path, device)
     assert z_dim == 2, "This script assumes latent_dim=2 for plotting."
     print(f"Loaded VAE: L={L}, z_dim={z_dim}")
+    diagnostics = None
+    if args.diagnostics:
+        diagnostics = ToyDiagnosticsLogger(
+            method="dgbo_latent_diffusion_distillation",
+            seed=args.seed,
+            problem="toy_circle_path",
+            config=vars(args),
+            results_root=args.diagnostics_root,
+            top_k=args.diagnostics_top_k,
+            max_proposals=args.diagnostics_max_proposals,
+            diversity_normalizer=latent_box_diversity_normalizer(args.z_box, z_dim),
+            step_size=step_size,
+            target_path=target,
+            decode_latent_fn=lambda z: decode_z_to_x_radians(vae, z, device),
+            objective_fn=lambda x: oracle_f(x, target, step_size, w_close, w_smooth),
+        )
+        if args.diagnostics_background_res > 1:
+            diagnostics.set_objective_background(args.z_box, args.diagnostics_background_res)
 
     eps_model, betas, z_mean, z_std, T = load_latent_diffusion(diff_path, device)
     print(f"Loaded latent diffusion: T={T}, betas in [{betas.min():.2e}, {betas.max():.2e}]")
@@ -1073,6 +1099,8 @@ def main():
     X_obs = np.array(X_obs, dtype=np.float64)
     y_obs = np.array(y_obs, dtype=np.float64)
     Z_obs = np.array(Z_obs, dtype=np.float64)
+    if diagnostics is not None:
+        diagnostics.set_initial_observations(Z_obs, y_obs, X_obs)
 
     print("[INIT] best y:", float(y_obs.max()))
     best_so_far = [float(y_obs.max())]
@@ -1303,6 +1331,26 @@ def main():
         Z_obs = np.vstack([Z_obs, z_next.reshape(1,-1)])
 
         best_so_far.append(float(y_obs.max()))
+        if diagnostics is not None:
+            best_idx_diag = int(np.argmax(y_obs))
+            diagnostics.record_iteration(
+                iteration=it,
+                selected_latent=z_next,
+                selected_objective=y_next,
+                best_so_far_objective=float(y_obs[best_idx_diag]),
+                incumbent_best_latent=Z_obs[best_idx_diag],
+                incumbent_best_objective=float(y_obs[best_idx_diag]),
+                selected_sequence=x_next,
+                incumbent_best_sequence=X_obs[best_idx_diag],
+                proposal_latents=cand_z,
+                proposal_acquisition_values=cand_score,
+                proposal_sequences=cand_x,
+                extra={
+                    "guide_mode": args.guide_mode,
+                    "selection_acquisition": args.select_acq,
+                    "weight": args.weight,
+                },
+            )
 
         if it == 1 or it % 5 == 0:
             print(f"[DGBO] it={it:03d} | y_next={y_next: .4f} | best={float(y_obs.max()): .4f} "
@@ -1356,6 +1404,16 @@ def main():
 
     trace_path = os.path.join(plot_root, "trace_dgbo.npz")
     np.savez_compressed(trace_path, X_obs=X_obs, y_obs=y_obs, Z_obs=Z_obs, best_so_far=np.array(best_so_far))
+    if diagnostics is not None:
+        diagnostics_path = diagnostics.finalize(
+            extra_summary={
+                "best_objective": y_best,
+                "best_latent": z_best,
+                "trace_path": trace_path,
+                "plot_root": plot_root,
+            }
+        )
+        print("Saved toy diagnostics:", os.path.abspath(diagnostics_path))
 
     print(f"\n=== DGBO finished (guide_mode={args.guide_mode}) ===")
     print("Best oracle:", y_best)

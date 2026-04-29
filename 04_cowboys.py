@@ -22,6 +22,7 @@ from toy_common import (
     set_seed,
     turtle_path,
 )
+from toy_diagnostics import ToyDiagnosticsLogger, latent_box_diversity_normalizer
 
 
 # =========================
@@ -264,6 +265,12 @@ def plot_final_summary(save_path, Z_data, Z_obs, y_obs, z_best, x_best, y_best, 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", type=str, default="toy_circle_data")
+    ap.add_argument(
+        "--plotroot",
+        type=str,
+        default=None,
+        help="Where to save plots/traces. Supports {seed} and {method}; default is results/toy_runs/cowboys/seed_{seed}.",
+    )
     ap.add_argument("--vae_path", type=str, default=None)
     ap.add_argument("--seed", type=int, default=0)
 
@@ -294,6 +301,13 @@ def main():
 
     # fallback if pCN returns zero samples (rare but possible)
     ap.add_argument("--fallback_random_tries", type=int, default=50)
+    ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
+                    help="Export non-invasive toy diagnostics JSON for post-processing.")
+    ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
+    ap.add_argument("--diagnostics_top_k", type=int, default=10)
+    ap.add_argument("--diagnostics_max_proposals", type=int, default=2000)
+    ap.add_argument("--diagnostics_background_res", type=int, default=60,
+                    help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
 
     args = ap.parse_args()
     set_seed(args.seed)
@@ -328,9 +342,28 @@ def main():
     assert latent_dim == 2, "This script assumes latent_dim=2 for 2D visualizations."
     assert X_all.shape[1] == L, f"Dataset L={X_all.shape[1]} but VAE expects L={L}"
 
-    # output dirs
-    plot_root = os.path.join(outdir, "comparison")
-    plot_root = os.path.join(plot_root, "cowboys")
+    diagnostics = None
+    if args.diagnostics:
+        diagnostics = ToyDiagnosticsLogger(
+            method="cowboys",
+            seed=args.seed,
+            problem="toy_circle_path",
+            config=vars(args),
+            results_root=args.diagnostics_root,
+            top_k=args.diagnostics_top_k,
+            max_proposals=args.diagnostics_max_proposals,
+            diversity_normalizer=latent_box_diversity_normalizer(args.z_box, latent_dim),
+            step_size=step_size,
+            target_path=target,
+            decode_latent_fn=lambda z: decode_z_to_delta_theta(vae, z, device),
+            objective_fn=lambda x: oracle_f(x, target, step_size, w_close, w_smooth),
+        )
+        if args.diagnostics_background_res > 1:
+            diagnostics.set_objective_background(args.z_box, args.diagnostics_background_res)
+
+    # output dirs. Seed-aware by default so repeated runs do not overwrite each other.
+    plotroot_template = args.plotroot or os.path.join("results", "toy_runs", "cowboys", "seed_{seed}")
+    plot_root = plotroot_template.format(seed=args.seed, method="cowboys")
     step_dir = os.path.join(plot_root, "steps")
     ensure_dir(step_dir)
 
@@ -367,6 +400,8 @@ def main():
     Z_obs = np.asarray(Z_obs, dtype=float)          # (n,2)
     X_obs = np.asarray(X_obs, dtype=float)          # (n,L)
     y_obs = np.asarray(y_obs, dtype=float)          # (n,)
+    if diagnostics is not None:
+        diagnostics.set_initial_observations(Z_obs, y_obs, X_obs)
 
     print("[INIT] best y:", float(y_obs.max()))
     best_so_far = [float(y_obs.max())]
@@ -487,6 +522,26 @@ def main():
         y_obs = np.append(y_obs, y_next)
 
         best_so_far.append(float(y_obs.max()))
+        if diagnostics is not None:
+            best_idx_diag = int(np.argmax(y_obs))
+            diagnostics.record_iteration(
+                iteration=t,
+                selected_latent=z_next,
+                selected_objective=y_next,
+                best_so_far_objective=float(y_obs[best_idx_diag]),
+                incumbent_best_latent=Z_obs[best_idx_diag],
+                incumbent_best_objective=float(y_obs[best_idx_diag]),
+                selected_sequence=x_next,
+                incumbent_best_sequence=X_obs[best_idx_diag],
+                proposal_latents=cand_mcmc,
+                proposal_acquisition_values=util,
+                proposal_sequences=X_cand,
+                extra={
+                    "accept_rate": acc_rate,
+                    "selection_acquisition": args.acq,
+                    "sampler": "pcn_pi_tilt",
+                },
+            )
 
         if t == 1 or t % 5 == 0:
             print(f"[COWBOYS] step {t:3d} | y_next={y_next: .4f} | best={float(y_obs.max()): .4f} | acc={acc_rate:.2f}")
@@ -523,6 +578,16 @@ def main():
     # save trace (now includes X_obs too, since GP is fit in x-space)
     trace_path = os.path.join(plot_root, "trace.npz")
     np.savez_compressed(trace_path, Z_obs=Z_obs, X_obs=X_obs, y_obs=y_obs, best_so_far=np.array(best_so_far))
+    if diagnostics is not None:
+        diagnostics_path = diagnostics.finalize(
+            extra_summary={
+                "best_objective": y_best,
+                "best_latent": z_best,
+                "trace_path": trace_path,
+                "plot_root": plot_root,
+            }
+        )
+        print("Saved toy diagnostics:", os.path.abspath(diagnostics_path))
 
     print("\n=== COWBOYS finished (structure-space GP + PI-tilted pCN) ===")
     print("Best oracle:", y_best)
