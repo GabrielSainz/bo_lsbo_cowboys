@@ -329,7 +329,8 @@ def main():
     assert X_all.shape[1] == L, f"Dataset L={X_all.shape[1]} but VAE expects L={L}"
 
     # output dirs
-    plot_root = os.path.join(outdir, "plots_cowboys_pcn_cowboys_tau05")
+    plot_root = os.path.join(outdir, "comparison")
+    plot_root = os.path.join(plot_root, "cowboys")
     step_dir = os.path.join(plot_root, "steps")
     ensure_dir(step_dir)
 
