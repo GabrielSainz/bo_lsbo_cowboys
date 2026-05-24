@@ -968,6 +968,8 @@ def main():
     ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
                     help="Export non-invasive toy diagnostics JSON for post-processing.")
     ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
+    ap.add_argument("--diagnostics_run_id", type=str, default=None,
+                    help="Optional config id used to keep sweep diagnostics from overwriting each other.")
     ap.add_argument("--diagnostics_top_k", type=int, default=10)
     ap.add_argument("--diagnostics_max_proposals", type=int, default=2000)
     ap.add_argument("--diagnostics_background_res", type=int, default=60,

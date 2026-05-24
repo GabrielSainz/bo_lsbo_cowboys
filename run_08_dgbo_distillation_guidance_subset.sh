@@ -65,6 +65,7 @@ for cfg in "${configs[@]}"; do
     --grid_res "$grid_res" \
     --plot_every "$plot_every" \
     --diagnostics_root "$diagnostics_root" \
+    --diagnostics_run_id "$tag" \
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \
     > "${plotroot}/stdout.log" \

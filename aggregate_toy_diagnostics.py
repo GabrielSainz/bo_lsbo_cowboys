@@ -145,9 +145,9 @@ def draw_objective_background(ax, run, filled=False):
 
 
 def load_runs(results_root):
-    pattern = os.path.join(results_root, "raw", "*", "*", "seed_*", "metrics.json")
+    pattern = os.path.join(results_root, "raw", "*", "*", "**", "metrics.json")
     runs = []
-    for path in sorted(glob.glob(pattern)):
+    for path in sorted(glob.glob(pattern, recursive=True)):
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         payload["_path"] = path

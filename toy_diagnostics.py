@@ -6,9 +6,11 @@ snapshots, and writes JSON that can be plotted without rerunning BO.
 """
 
 import csv
+import hashlib
 import json
 import math
 import os
+import re
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -72,6 +74,21 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [json_safe(v) for v in value]
     return value
+
+
+def safe_path_part(value: Any, max_length: int = 16) -> str:
+    """Return a compact filesystem-safe path component."""
+    text = str(value or "").strip()
+    text = re.sub(r"[^A-Za-z0-9_.=-]+", "_", text)
+    text = text.strip("._")
+    if not text:
+        return "run"
+    max_length = max(8, int(max_length))
+    if len(text) <= max_length:
+        return text
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    prefix = text[: max(1, max_length - 9)].rstrip("._-")
+    return f"{prefix}_{digest}"
 
 
 def as_2d_array(values: Any, width: Optional[int] = None) -> Optional[np.ndarray]:
@@ -209,13 +226,25 @@ class ToyDiagnosticsLogger:
         self.decode_latent_fn = decode_latent_fn
         self.objective_fn = objective_fn
 
-        self.run_dir = os.path.join(
-            self.results_root,
-            "raw",
-            self.method,
-            self.problem,
-            f"seed_{self.seed}",
-        )
+        raw_run_id = (config or {}).get("diagnostics_run_id")
+        run_id = safe_path_part(raw_run_id)
+        if raw_run_id is not None:
+            # Keep sweep paths short on Windows; the full tag remains in config.
+            run_parts = [
+                self.results_root,
+                "raw",
+                self.method,
+            ]
+            run_parts.append(run_id)
+        else:
+            run_parts = [
+                self.results_root,
+                "raw",
+                self.method,
+                self.problem,
+            ]
+        run_parts.append(f"seed_{self.seed}")
+        self.run_dir = os.path.join(*run_parts)
         ensure_dir(self.run_dir)
 
         self.config = dict(config or {})

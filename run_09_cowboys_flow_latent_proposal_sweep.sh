@@ -82,6 +82,7 @@ for cfg in "${configs[@]}"; do
     --latent_ylim -4 4 \
     --grid_res "$grid_res" \
     --diagnostics_root "$diagnostics_root" \
+    --diagnostics_run_id "$tag" \
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_z_box "$diagnostics_z_box" \
     --diagnostics_background_res "$diagnostics_background_res" \
@@ -93,3 +94,5 @@ done
 
 echo "Done. Aggregate later with:"
 echo "python aggregate_toy_diagnostics.py --results_root ${diagnostics_root} --representative_iterations 10 50 100 --make_gifs"
+echo "Monitor this proposal sweep with:"
+echo "python plot_cowboys_flow_latent_proposal_sweep.py --diagnostics_root ${diagnostics_root} --runs_root ${runs_root}"
