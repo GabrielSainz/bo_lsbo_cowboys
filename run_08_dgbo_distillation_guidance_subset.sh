@@ -26,22 +26,22 @@ grid_res="${GRID_RES:-140}"
 diagnostics_top_k="${DIAGNOSTICS_TOP_K:-10}"
 diagnostics_background_res="${DIAGNOSTICS_BACKGROUND_RES:-60}"
 
-# label:guidance_scale:tau_guidance:clip_guidance
+# label:guide_mode:guidance_scale:tau_guidance:clip_guidance
 configs=(
-  "unguided:0.0:1.0:0.0"
-  "soft_clipped:0.5:10.0:5.0"
-  "base_mid_clip:1.0:20.0:30.0"
-  "strong_default:2.0:20.0:30.0"
+  "unguided:real:0.0:1.0:0.0"
+  "soft_clipped:distill:0.5:10.0:5.0"
+  "base_mid_clip:distill:1.0:20.0:30.0"
+  "strong_default:distill:2.0:20.0:30.0"
 )
 
 for cfg in "${configs[@]}"; do
-  IFS=: read -r label guidance_scale tau_guidance clip_guidance <<< "$cfg"
-  tag="${guide_mode}_${label}_tau${tau_guidance}_gs${guidance_scale}_clip${clip_guidance}_cand${n_cand}"
+  IFS=: read -r label cfg_guide_mode guidance_scale tau_guidance clip_guidance <<< "$cfg"
+  tag="${cfg_guide_mode}_${label}_tau${tau_guidance}_gs${guidance_scale}_clip${clip_guidance}_cand${n_cand}"
   plotroot="${runs_root}/dgbo_distillation_guidance_subset/${tag}/seed_${seed}"
   mkdir -p "$plotroot"
 
   echo "=== DGBO distillation guidance subset seed=${seed} ${tag} ==="
-  python -u 08_dgbo_latent_diffusion_distillation.py \
+  if ! python -u 08_dgbo_latent_diffusion_distillation.py \
     --outdir "$outdir" \
     --plotroot "$plotroot" \
     --seed "$seed" \
@@ -50,7 +50,7 @@ for cfg in "${configs[@]}"; do
     --weight "$weight" \
     --select_acq "$select_acq" \
     --xi "$xi" \
-    --guide_mode "$guide_mode" \
+    --guide_mode "$cfg_guide_mode" \
     --guide_every "$guide_every" \
     --n_cand "$n_cand" \
     --tau_guidance "$tau_guidance" \
@@ -64,7 +64,14 @@ for cfg in "${configs[@]}"; do
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \
     > "${plotroot}/stdout.log" \
-    2> "${plotroot}/stderr.log"
+    2> "${plotroot}/stderr.log"; then
+    echo "ERROR: run failed for ${tag}"
+    echo "---- stdout tail (${plotroot}/stdout.log) ----"
+    tail -n 80 "${plotroot}/stdout.log" || true
+    echo "---- stderr tail (${plotroot}/stderr.log) ----"
+    tail -n 120 "${plotroot}/stderr.log" || true
+    exit 1
+  fi
 
   echo "saved: ${plotroot}"
 done

@@ -45,7 +45,7 @@ for cfg in "${configs[@]}"; do
   mkdir -p "$plotroot"
 
   echo "=== DGBO REINFORCE guidance subset seed=${seed} ${tag} ==="
-  python -u 07_dgbo_latent_diffusion_reinforce.py \
+  if ! python -u 07_dgbo_latent_diffusion_reinforce.py \
     --outdir "$outdir" \
     --plotroot "$plotroot" \
     --seed "$seed" \
@@ -71,7 +71,14 @@ for cfg in "${configs[@]}"; do
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \
     > "${plotroot}/stdout.log" \
-    2> "${plotroot}/stderr.log"
+    2> "${plotroot}/stderr.log"; then
+    echo "ERROR: run failed for ${tag}"
+    echo "---- stdout tail (${plotroot}/stdout.log) ----"
+    tail -n 80 "${plotroot}/stdout.log" || true
+    echo "---- stderr tail (${plotroot}/stderr.log) ----"
+    tail -n 120 "${plotroot}/stderr.log" || true
+    exit 1
+  fi
 
   echo "saved: ${plotroot}"
 done
