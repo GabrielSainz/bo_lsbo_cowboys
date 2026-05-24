@@ -21,6 +21,8 @@ import os
 import json
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import torch
@@ -288,7 +290,6 @@ def grad_log_weight_PI(gp, x, best_y, xi=0.06):
     grad_u = (sigma * grad_mu - imp * grad_sigma) / (sigma**2)
 
     # grad log PI = (phi/Phi) * grad_u  (stable mills ratio)
-    print("u=", u, "sigma=", sigma, "||grad_mu||=", np.linalg.norm(grad_mu), "min_ell=", np.min(parse_kernel_params(gp)[1]))
     return mills_ratio(u) * grad_u
 
 
@@ -330,6 +331,20 @@ def gp_acquisition(gp, x, best_y, acq="ei", xi=0.06):
     else:
         raise ValueError("acq must be one of: mu, pi, ei")
 
+
+def gp_acquisition_values(gp, X, best_y, acq="ei", xi=0.06):
+    """Vectorized acquisition values for candidate ranking; no gradients needed."""
+    mu, sigma = gp.predict(np.asarray(X, dtype=np.float64), return_std=True)
+    sigma = np.maximum(sigma, 1e-12)
+    if acq == "mu":
+        return mu.astype(np.float64)
+    if acq == "pi":
+        u = (mu - best_y - xi) / sigma
+        return log_ndtr(u).astype(np.float64)
+    if acq == "ei":
+        return expected_improvement(mu, sigma, best_y=best_y, xi=xi).astype(np.float64)
+    raise ValueError("acq must be one of: mu, pi, ei")
+
 # -------------------------
 # Guided DDPM sampler in latent space
 # -------------------------
@@ -355,7 +370,8 @@ def guided_sample_latent_z0_norm(
     clip_guidance: float,
     device,
     tau_guidance: float = 1.0,
-    keep_traj: bool = False
+    keep_traj: bool = False,
+    verbose: bool = False,
 ):
     """
     Returns:
@@ -373,10 +389,11 @@ def guided_sample_latent_z0_norm(
     z_std_t  = torch.tensor(z_std, device=device, dtype=torch.float32)   # (1,2)
     
     debug_every = 10          # print every N guided steps
-    log_every_step = True    # if True, prints a lot
+    log_every_step = False
 
     for t in reversed(range(T)):
-        print(f"Sampling t={t}/{T-1}...", end="\r")
+        if verbose:
+            print(f"Sampling t={t}/{T-1}...", end="\r")
         tt = torch.full((1,), t, device=device, dtype=torch.long)
         with torch.no_grad():
             eps_hat = eps_model(z, tt)  # (1,2)
@@ -386,7 +403,8 @@ def guided_sample_latent_z0_norm(
         ab = float(abar[t].item())
         do_guide = (t % max(1, guide_every) == 0) and (ab > 1e-4) and (ab < 0.999)
         #do_guide = (t % max(1, guide_every) == 0) and (ab > 0.25) and (ab < 0.995)
-        print(f"t={t} abar={ab:,.4f} guide={do_guide} ", end="")
+        if verbose:
+            print(f"t={t} abar={ab:,.4f} guide={do_guide} ", end="")
         # guidance (every k steps)
         if guidance_scale > 0.0 and do_guide:
             ab = abar[t]
@@ -462,7 +480,7 @@ def guided_sample_latent_z0_norm(
             denorm = torch.norm(delta_eps, dim=1, keepdim=True).clamp(min=1e-12)
 
             # ----- (E) print throttled -----
-            should_print = log_every_step or (t % debug_every == 0) or bool(was_clipped.item())
+            should_print = verbose and (log_every_step or (t % debug_every == 0) or bool(was_clipped.item()))
             if should_print:
                 print(
                     f"[GUIDE] t={t:4d} abar={float(ab.item()):.4f} "
@@ -502,6 +520,117 @@ def guided_sample_latent_z0_norm(
 
     z0_norm = z.detach().cpu().numpy().reshape(-1).astype(np.float64)
     return z0_norm, traj
+
+
+def guided_sample_latent_z0_norm_batch(
+    eps_model: nn.Module,
+    vae: nn.Module,
+    gp: GaussianProcessRegressor,
+    betas: np.ndarray,
+    z_mean: np.ndarray,
+    z_std: np.ndarray,
+    best_y: float,
+    xi: float,
+    weight: str,
+    guidance_scale: float,
+    guide_every: int,
+    clip_guidance: float,
+    device,
+    n_samples: int,
+    batch_size: int,
+    tau_guidance: float = 1.0,
+    keep_traj: bool = False,
+    verbose: bool = False,
+):
+    """Batch guided DDPM sampling. Internal samples are not oracle calls."""
+    n_samples = int(n_samples)
+    batch_size = max(1, int(batch_size))
+    if n_samples <= 0:
+        return np.zeros((0, z_mean.shape[1]), dtype=np.float64), None
+
+    betas_t, alphas, abar = ddpm_arrays(betas, device)
+    T = betas_t.shape[0]
+    z_dim = int(z_mean.shape[1])
+    z_mean_t = torch.tensor(z_mean, device=device, dtype=torch.float32)
+    z_std_t = torch.tensor(z_std, device=device, dtype=torch.float32)
+    checkpoints = {T - 1, int(0.8 * (T - 1)), int(0.6 * (T - 1)), int(0.4 * (T - 1)), int(0.2 * (T - 1)), 0}
+
+    out = []
+    one_traj = None
+    for start in range(0, n_samples, batch_size):
+        B = min(batch_size, n_samples - start)
+        z = torch.randn(B, z_dim, device=device)
+        store_traj = keep_traj and one_traj is None
+        traj = [z[:1].detach().cpu().numpy().reshape(-1)] if store_traj else None
+
+        for t in reversed(range(T)):
+            if verbose:
+                print(f"Sampling batch {start + 1}-{start + B}/{n_samples} t={t}/{T-1}...", end="\r")
+            tt = torch.full((B,), t, device=device, dtype=torch.long)
+            with torch.no_grad():
+                eps_hat = eps_model(z, tt)
+            eps_use = eps_hat
+
+            ab_float = float(abar[t].item())
+            do_guide = (t % max(1, guide_every) == 0) and (ab_float > 1e-4) and (ab_float < 0.999)
+            if guidance_scale > 0.0 and do_guide:
+                ab = abar[t]
+                sqrt_ab = torch.sqrt(ab)
+                sqrt_1mab = torch.sqrt(1.0 - ab)
+                z0_hat_norm = (z - sqrt_1mab * eps_hat) / torch.clamp(sqrt_ab, min=1e-12)
+                z0_hat_real = (z0_hat_norm.detach() * z_std_t + z_mean_t).clone().detach().requires_grad_(True)
+
+                x_scaled = vae.decode(z0_hat_real)
+                x_rad = x_scaled * np.pi
+                X_np = x_rad.detach().cpu().numpy().astype(np.float64)
+                grad_rows = []
+                for xb in X_np:
+                    if weight == "pi":
+                        grad_x = grad_log_weight_PI(gp, xb, best_y=best_y, xi=xi)
+                    elif weight == "ei":
+                        grad_x = grad_log_weight_EI(gp, xb, best_y=best_y, xi=xi)
+                    else:
+                        raise ValueError("weight must be 'pi' or 'ei'")
+                    grad_rows.append(tau_guidance * grad_x)
+
+                grad_x_torch = torch.tensor(np.stack(grad_rows), device=device, dtype=torch.float32)
+                scalar = (x_rad * grad_x_torch).sum()
+                if z0_hat_real.grad is not None:
+                    z0_hat_real.grad.zero_()
+                scalar.backward()
+                grad_z0_real = z0_hat_real.grad.detach()
+                grad_z_t = (z_std_t / torch.clamp(sqrt_ab, min=1e-12)) * grad_z0_real
+
+                if clip_guidance > 0.0:
+                    gnorm = torch.norm(grad_z_t, dim=1, keepdim=True).clamp(min=1e-12)
+                    grad_z_t = grad_z_t * (clip_guidance / gnorm).clamp(max=1.0)
+
+                eps_use = eps_hat - guidance_scale * sqrt_1mab * grad_z_t
+
+            beta = betas_t[t]
+            alpha = alphas[t]
+            ab = abar[t]
+            if t > 0:
+                ab_prev = abar[t - 1]
+                beta_tilde = beta * (1.0 - ab_prev) / torch.clamp(1.0 - ab, min=1e-12)
+                sigma = torch.sqrt(torch.clamp(beta_tilde, min=1e-20))
+                noise = torch.randn_like(z)
+            else:
+                sigma = 0.0
+                noise = torch.zeros_like(z)
+
+            mean = (1.0 / torch.sqrt(alpha)) * (z - (beta / torch.sqrt(torch.clamp(1.0 - ab, min=1e-12))) * eps_use)
+            noise = torch.zeros_like(z)
+            z = mean + sigma * noise
+
+            if store_traj and t in checkpoints:
+                traj.append(z[:1].detach().cpu().numpy().reshape(-1))
+
+        out.append(z.detach().cpu().numpy().astype(np.float64))
+        if store_traj:
+            one_traj = traj
+
+    return np.vstack(out), one_traj
 
 
 @torch.no_grad()
@@ -640,6 +769,8 @@ def main():
 
     # guided diffusion sampling
     ap.add_argument("--n_cand", type=int, default=24, help="batch of guided diffusion samples per BO iteration")
+    ap.add_argument("--candidate_batch_size", type=int, default=0,
+                    help="How many diffusion candidates to sample in one GPU batch; 0 means all n_cand.")
     ap.add_argument("--guidance_scale", type=float, default=1.0)
     ap.add_argument("--guide_every", type=int, default=1)
     ap.add_argument("--clip_guidance", type=float, default=0, help="max norm of guidance grad in z_t (0 disables)")
@@ -658,6 +789,8 @@ def main():
 
     ap.add_argument("--z_box", type=float, default=6)
     ap.add_argument("--grid_res", type=int, default=140)
+    ap.add_argument("--plot_every", type=int, default=1,
+                    help="Save dense acquisition-grid PNGs every k BO iterations; 0 disables per-step PNGs.")
     ap.add_argument("--plot_acq", type=str, default="pi", choices=["mu","pi","ei"])
 
     ap.add_argument("--tau_guidance", type=float, default=1.0)
@@ -833,48 +966,38 @@ def main():
         )
         gp.fit(X_fit, y_fit)
 
-        # --- Acquisition grid in latent space (for plotting like COWBOYS) ---
-        z1 = np.linspace(-args.z_box, args.z_box, args.grid_res)
-        z2 = np.linspace(-args.z_box, args.z_box, args.grid_res)
-        grid_x, grid_y = np.meshgrid(z1, z2)
-        Z_grid = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)  # (G,2)
+        plot_this_iter = args.plot_every > 0 and (it == 1 or it % args.plot_every == 0 or it == args.n_steps)
+        grid_x = grid_y = A_grid = A_name = None
+        if plot_this_iter:
+            # Dense latent EI/PI grids are visualization-only; they are not oracle calls.
+            z1 = np.linspace(-args.z_box, args.z_box, args.grid_res)
+            z2 = np.linspace(-args.z_box, args.z_box, args.grid_res)
+            grid_x, grid_y = np.meshgrid(z1, z2)
+            Z_grid = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)  # (G,2)
 
-        # decode latent grid -> X grid in radians
-        X_grid = decode_batch_z_to_x_radians(vae, Z_grid, device)    # (G,L)
+            X_grid = decode_batch_z_to_x_radians(vae, Z_grid, device)
+            mu_g, std_g = gp.predict(X_grid, return_std=True)
 
-        # GP predictions in x-space
-        mu_g, std_g = gp.predict(X_grid, return_std=True)
+            if args.plot_acq == "mu":
+                A = mu_g
+                A_name = r"$\mu(x=h(z))$"
+            elif args.plot_acq == "pi":
+                u = (mu_g - best_y - args.xi) / np.maximum(std_g, 1e-12)
+                A = norm_cdf(u)
+                A_name = r"$\mathrm{PI}(x=h(z))$"
+            else:  # "ei"
+                A = expected_improvement(mu_g, std_g, best_y=best_y, xi=args.xi)
+                A_name = r"$\mathrm{EI}(x=h(z))$"
 
-        # choose what to show in the heatmap
-        if args.plot_acq == "mu":
-            A = mu_g
-            A_name = r"$\mu(x=h(z))$"
-        elif args.plot_acq == "pi":
-            u = (mu_g - best_y - args.xi) / np.maximum(std_g, 1e-12)
-            A = norm_cdf(u)
-            A_name = r"$\mathrm{PI}(x=h(z))$"
-        else:  # "ei"
-            A = expected_improvement(mu_g, std_g, best_y=best_y, xi=args.xi)
-            A_name = r"$\mathrm{EI}(x=h(z))$"
-
-        A_grid = A.reshape(args.grid_res, args.grid_res)
-
-        #======================= plot grid =======================
-        fig = plt.figure(figsize=(5, 5))
-
-        # (1) Acquisition heatmap + overlays
-        ax1 = fig.add_subplot(1, 1, 1)
-        if A_grid is not None:
+            A_grid = A.reshape(args.grid_res, args.grid_res)
+            fig = plt.figure(figsize=(5, 5))
+            ax1 = fig.add_subplot(1, 1, 1)
             im = ax1.contourf(grid_x, grid_y, A_grid, levels=35)
             plt.colorbar(im, ax=ax1, label=A_name)
-        
-        save_grid = os.path.join(grid_dir, f"step_{it:03d}.png")
-
-        plt.tight_layout()
-        plt.savefig(save_grid, dpi=170)
-        plt.close(fig)
-
-        #=======================================================
+            save_grid = os.path.join(grid_dir, f"step_{it:03d}.png")
+            plt.tight_layout()
+            plt.savefig(save_grid, dpi=170)
+            plt.close(fig)
         
         if it == 1 or it % 5 == 0:
             try:
@@ -883,49 +1006,30 @@ def main():
             except Exception as e:
                 print(f"[GP] it={it:03d} | kernel parse failed: {e}")
 
-        # generate guided candidates (batch)
-        cand_x = []
-        cand_z = []
-        cand_score = []
-        one_traj = None
-
-        for k in range(args.n_cand):
-            print(f"====================== Sampling candidate {k+1}/{args.n_cand} via guided diffusion...", end="\r")
-            z0n, traj = guided_sample_latent_z0_norm(
-                eps_model=eps_model,
-                vae=vae,
-                gp=gp,
-                betas=betas,
-                z_mean=z_mean,
-                z_std=z_std,
-                best_y=best_y,
-                xi=args.xi,
-                weight=args.weight,
-                guidance_scale=args.guidance_scale,
-                guide_every=args.guide_every,
-                clip_guidance=args.clip_guidance,
-                device=device,
-                tau_guidance=args.tau_guidance,
-                keep_traj=(k == 0)  # keep trajectory for first candidate for plotting
-            )
-            if k == 0:
-                one_traj = traj
-
-            z0_real = (z0n.reshape(1,2) * z_std + z_mean).reshape(-1)
-            x = decode_z_to_x_radians(vae, z0_real, device)
-            #x = decode_z_to_x_radians(vae, z0n, device)
-            
-            s = gp_acquisition(gp, x, best_y=best_y, acq=args.select_acq, xi=args.xi)
-            print("logPI:", s, " PI:", float(np.exp(s)))
-
-            cand_x.append(x)
-            cand_z.append(z0_real)
-            #cand_z.append(z0n)
-            cand_score.append(s)
-
-        cand_x = np.array(cand_x, dtype=np.float64)
-        cand_z = np.array(cand_z, dtype=np.float64)
-        cand_score = np.array(cand_score, dtype=np.float64)
+        # Generate M guided proposal candidates; these internal samples are not oracle calls.
+        candidate_batch_size = args.candidate_batch_size if args.candidate_batch_size > 0 else args.n_cand
+        z0n_batch, one_traj = guided_sample_latent_z0_norm_batch(
+            eps_model=eps_model,
+            vae=vae,
+            gp=gp,
+            betas=betas,
+            z_mean=z_mean,
+            z_std=z_std,
+            best_y=best_y,
+            xi=args.xi,
+            weight=args.weight,
+            guidance_scale=args.guidance_scale,
+            guide_every=args.guide_every,
+            clip_guidance=args.clip_guidance,
+            device=device,
+            n_samples=args.n_cand,
+            batch_size=candidate_batch_size,
+            tau_guidance=args.tau_guidance,
+            keep_traj=plot_this_iter,
+        )
+        cand_z = z0n_batch * z_std + z_mean
+        cand_x = decode_batch_z_to_x_radians(vae, cand_z, device)
+        cand_score = gp_acquisition_values(gp, cand_x, best_y=best_y, acq=args.select_acq, xi=args.xi)
 
         # pick next candidate from batch
         j = int(np.argmax(cand_score))
@@ -966,6 +1070,7 @@ def main():
                     "tau_guidance": args.tau_guidance,
                     "guidance_scale": args.guidance_scale,
                     "clip_guidance": args.clip_guidance,
+                    "candidate_batch_size": candidate_batch_size,
                 },
             )
 
@@ -973,28 +1078,28 @@ def main():
             print(f"[DGBO] it={it:03d} | y_next={y_next: .4f} | best={float(y_obs.max()): .4f} "
                   f"| batch_best_{args.select_acq}={float(cand_score.max()):.3g}")
 
-        # step plot
-        save_path = os.path.join(step_dir, f"step_{it:03d}.png")
-        best_idx = int(np.argmax(y_obs))
-        z_best = Z_obs[best_idx]
-        y_best = float(y_obs[best_idx])
+        if plot_this_iter:
+            save_path = os.path.join(step_dir, f"step_{it:03d}.png")
+            best_idx = int(np.argmax(y_obs))
+            z_best = Z_obs[best_idx]
+            y_best = float(y_obs[best_idx])
 
-        plot_step(
-            save_path=save_path,
-            Z_data=Z_data,
-            Z_obs=Z_obs,
-            y_obs=y_obs,
-            Z_cand=cand_z,
-            z_next=z_next,
-            y_next=y_next,
-            z_best=z_best,
-            y_best=y_best,
-            x_next=x_next,
-            step_size=step_size,
-            best_so_far=best_so_far,
-            grid_x=grid_x, grid_y=grid_y, A_grid=A_grid, A_name=A_name,
-            traj=None
-        )
+            plot_step(
+                save_path=save_path,
+                Z_data=Z_data,
+                Z_obs=Z_obs,
+                y_obs=y_obs,
+                Z_cand=cand_z,
+                z_next=z_next,
+                y_next=y_next,
+                z_best=z_best,
+                y_best=y_best,
+                x_next=x_next,
+                step_size=step_size,
+                best_so_far=best_so_far,
+                grid_x=grid_x, grid_y=grid_y, A_grid=A_grid, A_name=A_name,
+                traj=one_traj,
+            )
 
 
     # final summary

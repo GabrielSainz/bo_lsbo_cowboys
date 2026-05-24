@@ -17,9 +17,11 @@ n_cand="${N_CAND:-$candidate_budget}"
 weight="${WEIGHT:-pi}"
 select_acq="${SELECT_ACQ:-pi}"
 xi="${XI:-0.06}"
-guide_every="${GUIDE_EVERY:-1}"
+guide_every="${GUIDE_EVERY:-5}"
+candidate_batch_size="${CANDIDATE_BATCH_SIZE:-64}"
 z_box="${Z_BOX:-5}"
 grid_res="${GRID_RES:-140}"
+plot_every="${PLOT_EVERY:-1}"
 
 reinforce_k="${REINFORCE_K:-512}"
 reinforce_sigma="${REINFORCE_SIGMA:-0.25}"
@@ -56,6 +58,7 @@ for cfg in "${configs[@]}"; do
     --xi "$xi" \
     --guide_every "$guide_every" \
     --n_cand "$n_cand" \
+    --candidate_batch_size "$candidate_batch_size" \
     --tau_guidance "$tau_guidance" \
     --guidance_scale "$guidance_scale" \
     --clip_guidance "$clip_guidance" \
@@ -67,6 +70,7 @@ for cfg in "${configs[@]}"; do
     --reinforce_adv_clip "$reinforce_adv_clip" \
     --z_box "$z_box" \
     --grid_res "$grid_res" \
+    --plot_every "$plot_every" \
     --diagnostics_root "$diagnostics_root" \
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \

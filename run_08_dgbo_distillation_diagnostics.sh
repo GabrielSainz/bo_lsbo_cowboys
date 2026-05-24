@@ -17,7 +17,9 @@ select_acq="${SELECT_ACQ:-pi}"
 xi="${XI:-0.06}"
 guide_mode="${GUIDE_MODE:-distill}"
 guide_every="${GUIDE_EVERY:-1}"
-n_cand="${N_CAND:-1}"
+candidate_budget="${M:-200}"
+n_cand="${N_CAND:-$candidate_budget}"
+candidate_batch_size="${CANDIDATE_BATCH_SIZE:-64}"
 tau_guidance="${TAU_GUIDANCE:-5.0}"
 guidance_scale="${GUIDANCE_SCALE:-5.0}"
 clip_guidance="${CLIP_GUIDANCE:-10.0}"
@@ -25,6 +27,7 @@ distill_target_clip_low="${DISTILL_TARGET_CLIP_LOW:--30.0}"
 distill_target_clip_high="${DISTILL_TARGET_CLIP_HIGH:-0.0}"
 z_box="${Z_BOX:-6}"
 grid_res="${GRID_RES:-140}"
+plot_every="${PLOT_EVERY:-0}"
 diagnostics_top_k="${DIAGNOSTICS_TOP_K:-10}"
 diagnostics_background_res="${DIAGNOSTICS_BACKGROUND_RES:-60}"
 
@@ -46,6 +49,7 @@ for seed in "${seeds[@]}"; do
     --guide_mode "$guide_mode" \
     --guide_every "$guide_every" \
     --n_cand "$n_cand" \
+    --candidate_batch_size "$candidate_batch_size" \
     --tau_guidance "$tau_guidance" \
     --guidance_scale "$guidance_scale" \
     --clip_guidance "$clip_guidance" \
@@ -53,6 +57,7 @@ for seed in "${seeds[@]}"; do
     --distill_target_clip_high "$distill_target_clip_high" \
     --z_box "$z_box" \
     --grid_res "$grid_res" \
+    --plot_every "$plot_every" \
     --diagnostics_root "$diagnostics_root" \
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \

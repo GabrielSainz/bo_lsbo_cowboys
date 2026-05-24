@@ -18,8 +18,10 @@ weight="${WEIGHT:-pi}"
 select_acq="${SELECT_ACQ:-pi}"
 xi="${XI:-0.06}"
 guide_every="${GUIDE_EVERY:-1}"
+candidate_batch_size="${CANDIDATE_BATCH_SIZE:-64}"
 z_box="${Z_BOX:-5}"
 grid_res="${GRID_RES:-140}"
+plot_every="${PLOT_EVERY:-1}"
 diagnostics_top_k="${DIAGNOSTICS_TOP_K:-10}"
 diagnostics_background_res="${DIAGNOSTICS_BACKGROUND_RES:-60}"
 
@@ -39,6 +41,10 @@ configs=(
   "strong_high_tau:2.0:40.0:30.0"
   "very_strong_clip:4.0:20.0:30.0"
   "very_strong_high_tau:4.0:40.0:50.0"
+  "extreme_clip:6.0:20.0:50.0"
+  "extreme_high_tau:6.0:40.0:75.0"
+  "ultra_clip:8.0:20.0:75.0"
+  "ultra_high_tau:8.0:40.0:100.0"
 )
 
 for cfg in "${configs[@]}"; do
@@ -59,11 +65,13 @@ for cfg in "${configs[@]}"; do
     --xi "$xi" \
     --guide_every "$guide_every" \
     --n_cand "$n_cand" \
+    --candidate_batch_size "$candidate_batch_size" \
     --tau_guidance "$tau_guidance" \
     --guidance_scale "$guidance_scale" \
     --clip_guidance "$clip_guidance" \
     --z_box "$z_box" \
     --grid_res "$grid_res" \
+    --plot_every "$plot_every" \
     --diagnostics_root "$diagnostics_root" \
     --diagnostics_top_k "$diagnostics_top_k" \
     --diagnostics_background_res "$diagnostics_background_res" \

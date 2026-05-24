@@ -7,6 +7,8 @@ set -euo pipefail
 tau="20.0"
 guidance_scale="2.0"
 clip_guidance="10.0"
+candidate_batch_size="${CANDIDATE_BATCH_SIZE:-1}"
+plot_every="${PLOT_EVERY:-0}"
 
 outdir="toy_circle_data"
 plotroot="${outdir}/03_dgbo_reinforce/${tau}_gs${guidance_scale}_clip${clip_guidance}"
@@ -22,6 +24,7 @@ python -u 07_dgbo_latent_diffusion_reinforce.py \
   --select_acq pi \
   --xi 0.06 \
   --guide_every 2 \
+  --candidate_batch_size "$candidate_batch_size" \
   --tau_guidance "$tau" \
   --guidance_scale "$guidance_scale" \
   --clip_guidance "$clip_guidance" \
@@ -31,6 +34,7 @@ python -u 07_dgbo_latent_diffusion_reinforce.py \
   --reinforce_logw_clip_low -12 \
   --reinforce_logw_clip_high 0 \
   --reinforce_adv_clip 5 \
+  --plot_every "$plot_every" \
   >  "${plotroot}/stdout.log" \
   2> "${plotroot}/stderr.log"
 
