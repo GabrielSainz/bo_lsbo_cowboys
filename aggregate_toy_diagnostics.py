@@ -23,16 +23,45 @@ METHOD_LABELS = {
     "lsbo": "LSBO",
     "cowboys": "COWBOYS",
     "dgbo_latent_diffusion": "DGBO",
+    "dgbo_dist": "DGBO Distill",
     "dgbo_latent_diffusion_distillation": "DGBO Distill",
     "cowboys_flow_latent": "COWBOYS Flow",
 }
+
+METHOD_ORDER = [
+    "lsbo",
+    "cowboys",
+    "dgbo_latent_diffusion",
+    "dgbo_dist",
+    "dgbo_latent_diffusion_distillation",
+    "cowboys_flow_latent",
+]
 
 METHOD_COLORS = {
     "lsbo": "tab:blue",
     "cowboys": "tab:orange",
     "dgbo_latent_diffusion": "tab:purple",
+    "dgbo_dist": "tab:green",
     "dgbo_latent_diffusion_distillation": "tab:green",
     "cowboys_flow_latent": "tab:red",
+}
+
+METHOD_LINESTYLES = {
+    "lsbo": "-",
+    "cowboys": "-",
+    "dgbo_latent_diffusion": "--",
+    "dgbo_dist": "-.",
+    "dgbo_latent_diffusion_distillation": "-.",
+    "cowboys_flow_latent": "-",
+}
+
+METHOD_MARKERS = {
+    "lsbo": "o",
+    "cowboys": "s",
+    "dgbo_latent_diffusion": "^",
+    "dgbo_dist": "D",
+    "dgbo_latent_diffusion_distillation": "D",
+    "cowboys_flow_latent": "P",
 }
 
 MAIN_METRICS = [
@@ -45,6 +74,10 @@ RAW_TOPK_METRICS = [
     ("mean_top_k_objective", "Mean top-k objective"),
     ("top_k_latent_diversity", "Top-k latent diversity"),
 ]
+
+BIN_REDUCERS = {
+    "best_so_far_objective": "last",
+}
 
 
 def ensure_dir(path):
@@ -123,52 +156,191 @@ def load_runs(results_root):
     return runs
 
 
-def series(run, key):
+def ordered_methods(method_runs):
+    known = [method for method in METHOD_ORDER if method in method_runs]
+    extra = sorted(method for method in method_runs if method not in METHOD_ORDER)
+    return known + extra
+
+
+def reduce_bin(values, reducer):
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return np.nan
+    if reducer == "last":
+        return float(vals[-1])
+    return float(np.mean(vals))
+
+
+def series(run, key, bin_size=1):
     metric_series = run.get("metric_series", {})
     iterations = metric_series.get("bo_iteration", [])
     values = metric_series.get(key, [])
     n = min(len(iterations), len(values))
     x = np.asarray(iterations[:n], dtype=np.int64)
     y = np.asarray([finite_float(v) for v in values[:n]], dtype=np.float64)
-    return x, y
+    bin_size = int(bin_size)
+    if bin_size <= 1 or x.size == 0:
+        return x, y
+
+    reducer = BIN_REDUCERS.get(key, "mean")
+    binned_x = []
+    binned_y = []
+    max_it = int(np.nanmax(x))
+    for start in range(1, max_it + 1, bin_size):
+        end = start + bin_size - 1
+        mask = (x >= start) & (x <= end)
+        if not np.any(mask):
+            continue
+        binned_x.append(int(min(end, max_it)))
+        binned_y.append(reduce_bin(y[mask], reducer))
+    return np.asarray(binned_x, dtype=np.int64), np.asarray(binned_y, dtype=np.float64)
 
 
-def aggregate_series(runs, key):
-    all_iters = sorted({int(i) for run in runs for i in series(run, key)[0]})
+def aggregate_series(runs, key, variability="sem", bin_size=1):
+    all_iters = sorted({int(i) for run in runs for i in series(run, key, bin_size=bin_size)[0]})
     if not all_iters:
-        return np.zeros((0,), dtype=int), np.zeros((0,)), np.zeros((0,))
+        return np.zeros((0,), dtype=int), np.zeros((0,)), np.zeros((0,)), np.zeros((0,), dtype=int)
 
     mat = np.full((len(runs), len(all_iters)), np.nan, dtype=np.float64)
     pos = {it: j for j, it in enumerate(all_iters)}
     for r, run in enumerate(runs):
-        x, y = series(run, key)
+        x, y = series(run, key, bin_size=bin_size)
         for it, val in zip(x, y):
             mat[r, pos[int(it)]] = val
 
-    mean = np.nanmean(mat, axis=0)
-    std = np.nanstd(mat, axis=0)
-    return np.asarray(all_iters, dtype=int), mean, std
+    mean = np.full(len(all_iters), np.nan, dtype=np.float64)
+    spread = np.full(len(all_iters), np.nan, dtype=np.float64)
+    counts = np.sum(np.isfinite(mat), axis=0).astype(int)
+    for j in range(len(all_iters)):
+        vals = mat[:, j]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        mean[j] = float(np.mean(vals))
+        if vals.size > 1:
+            std = float(np.std(vals))
+            if variability == "std":
+                spread[j] = std
+            elif variability == "sem":
+                spread[j] = std / np.sqrt(vals.size)
+            else:
+                spread[j] = np.nan
+        elif variability in {"std", "sem"}:
+            spread[j] = 0.0
+    return np.asarray(all_iters, dtype=int), mean, spread, counts
 
 
-def plot_metric_grid(method_runs, metric_specs, save_path, title):
-    fig, axes = plt.subplots(1, len(metric_specs), figsize=(5.4 * len(metric_specs), 4.2))
+def robust_limits(values, low_q=0.03, high_q=0.97):
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None, False
+    lo = float(np.quantile(vals, low_q))
+    hi = float(np.quantile(vals, high_q))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None, False
+    if abs(hi - lo) < 1e-12:
+        lo = float(np.min(vals))
+        hi = float(np.max(vals))
+    span = max(hi - lo, 1e-6)
+    pad = 0.10 * span
+    clipped = bool(np.nanmin(vals) < lo or np.nanmax(vals) > hi)
+    return (lo - pad, hi + pad), clipped
+
+
+def plot_metric_grid(method_runs, metric_specs, save_path, title, robust_y=True, variability="sem", bin_size=1):
+    fig, axes = plt.subplots(1, len(metric_specs), figsize=(5.9 * len(metric_specs), 4.9))
     axes = np.atleast_1d(axes)
+    legend_handles = {}
+    legend_labels = {}
+
     for ax, (key, label) in zip(axes, metric_specs):
-        for method, runs in method_runs.items():
-            x, mean, std = aggregate_series(runs, key)
+        axis_values = []
+        missing = []
+        for method in ordered_methods(method_runs):
+            runs = method_runs[method]
+            x, mean, spread, counts = aggregate_series(runs, key, variability=variability, bin_size=bin_size)
             if x.size == 0 or np.all(~np.isfinite(mean)):
+                missing.append(METHOD_LABELS.get(method, method))
                 continue
             color = METHOD_COLORS.get(method, None)
-            ax.plot(x, mean, linewidth=2.0, label=METHOD_LABELS.get(method, method), color=color)
-            if len(runs) > 1:
-                ax.fill_between(x, mean - std, mean + std, alpha=0.18, color=color)
+            markevery = max(1, len(x) // 12)
+            line, = ax.plot(
+                x,
+                mean,
+                linewidth=2.35,
+                label=METHOD_LABELS.get(method, method),
+                color=color,
+                linestyle=METHOD_LINESTYLES.get(method, "-"),
+                marker=METHOD_MARKERS.get(method, None),
+                markersize=4.2,
+                markevery=markevery,
+            )
+            legend_handles[method] = line
+            legend_labels[method] = METHOD_LABELS.get(method, method)
+            finite_mean = mean[np.isfinite(mean)]
+            axis_values.extend(finite_mean.tolist())
+            if len(runs) > 1 and variability != "none":
+                ok = np.isfinite(mean) & np.isfinite(spread)
+                if np.any(ok):
+                    lower = mean[ok] - spread[ok]
+                    upper = mean[ok] + spread[ok]
+                    axis_values.extend(lower.tolist())
+                    axis_values.extend(upper.tolist())
+                    ax.fill_between(x[ok], lower, upper, alpha=0.11, color=color, linewidth=0)
+
+        if robust_y:
+            ylim, clipped = robust_limits(axis_values)
+            if ylim is not None:
+                ax.set_ylim(ylim)
+                if clipped:
+                    ax.text(
+                        0.99,
+                        0.02,
+                        "robust y-scale",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=8,
+                        color="0.35",
+                    )
+        if missing:
+            ax.text(
+                0.01,
+                0.98,
+                "missing: " + ", ".join(missing),
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                color="0.35",
+                bbox=dict(facecolor="white", alpha=0.78, edgecolor="0.85", linewidth=0.5),
+            )
         ax.set_title(label)
         ax.set_xlabel("BO iteration")
         ax.grid(True, alpha=0.25)
     axes[0].set_ylabel("metric value")
-    axes[-1].legend(loc="best")
-    fig.suptitle(title)
-    fig.tight_layout()
+
+    ordered_legend = [method for method in ordered_methods(method_runs) if method in legend_handles]
+    if ordered_legend:
+        fig.legend(
+            [legend_handles[method] for method in ordered_legend],
+            [legend_labels[method] for method in ordered_legend],
+            loc="lower center",
+            ncol=min(len(ordered_legend), 5),
+            frameon=True,
+            bbox_to_anchor=(0.5, -0.005),
+        )
+    subtitle = "shaded band: standard error across seeds" if variability == "sem" else "shaded band: standard deviation across seeds"
+    if variability == "none":
+        subtitle = "seed means only"
+    if bin_size > 1:
+        subtitle += f"; plotted in {bin_size}-iteration bins"
+    if robust_y:
+        subtitle += "; y-limits use 3rd-97th percentile to reveal method differences"
+    fig.suptitle(f"{title}\n{subtitle}", fontsize=13)
+    fig.tight_layout(rect=(0.0, 0.11, 1.0, 0.91))
     fig.savefig(save_path, dpi=180)
     plt.close(fig)
 
@@ -543,6 +715,10 @@ def main():
     ap.add_argument("--gif_max_frames", type=int, default=80)
     ap.add_argument("--gif_seed_limit", type=int, default=1,
                     help="Number of seeds per method to animate; use 0 to animate all seeds.")
+    ap.add_argument("--variability", type=str, default="sem", choices=["sem", "std", "none"],
+                    help="Band shown around method means in metric plots.")
+    ap.add_argument("--iteration_bin_size", type=int, default=1,
+                    help="Plot metrics in non-overlapping iteration bins. Use 10 for one point per 10 BO iterations.")
     args = ap.parse_args()
 
     runs = load_runs(args.results_root)
@@ -566,12 +742,36 @@ def main():
         MAIN_METRICS,
         os.path.join(plots_dir, "iteration_metrics.png"),
         "Toy diagnostics: iteration-wise method comparison",
+        robust_y=True,
+        variability=args.variability,
+        bin_size=args.iteration_bin_size,
+    )
+    plot_metric_grid(
+        method_runs,
+        MAIN_METRICS,
+        os.path.join(plots_dir, "iteration_metrics_full_range.png"),
+        "Toy diagnostics: iteration-wise method comparison",
+        robust_y=False,
+        variability=args.variability,
+        bin_size=args.iteration_bin_size,
     )
     plot_metric_grid(
         method_runs,
         RAW_TOPK_METRICS,
         os.path.join(plots_dir, "raw_top_k_components.png"),
         "Toy diagnostics: raw top-k components",
+        robust_y=True,
+        variability=args.variability,
+        bin_size=args.iteration_bin_size,
+    )
+    plot_metric_grid(
+        method_runs,
+        RAW_TOPK_METRICS,
+        os.path.join(plots_dir, "raw_top_k_components_full_range.png"),
+        "Toy diagnostics: raw top-k components",
+        robust_y=False,
+        variability=args.variability,
+        bin_size=args.iteration_bin_size,
     )
     plot_latent_trajectories(method_runs, os.path.join(plots_dir, "latent_trajectories.png"))
 

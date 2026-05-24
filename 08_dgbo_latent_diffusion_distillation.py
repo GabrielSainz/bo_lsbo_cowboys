@@ -1000,7 +1000,7 @@ def main():
     diagnostics = None
     if args.diagnostics:
         diagnostics = ToyDiagnosticsLogger(
-            method="dgbo_latent_diffusion_distillation",
+            method="dgbo_dist",
             seed=args.seed,
             problem="toy_circle_path",
             config=vars(args),

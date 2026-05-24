@@ -1,5 +1,5 @@
-#python 03_lsbo.py --outdir toy_circle_data --n_steps 120 --xi 0.12 --eps_random 0.25 --z_box 6
-#python 03_lsbo.py  --outdir toy_circle_data --n_steps 120 --xi 0.12 --eps_random 0.25 --z_box 3 --n_init 15 --n_data_scatter 3000
+# Benchmark default:
+# python 03_lsbo.py --outdir toy_circle_data --seed 0 --n_init 15 --n_steps 150 --n_cand 200 --xi 0.08 --z_box 5 --selection_rule argmax_ei --proposal_dist trunc_normal --eps_random 0.0 --topk_ei 1
 
 
 import os
@@ -32,16 +32,19 @@ from toy_diagnostics import ToyDiagnosticsLogger, latent_box_diversity_normalize
 def plot_step_2d(step_idx, save_path,Z_data,
                  grid_x, grid_y, EI_grid,
                  Z_obs, y_obs, z_next,
+                 Z_cand,
                  x_next, y_next,
                  best_so_far,
                  step_size):
     fig = plt.figure(figsize=(14, 4.8))
 
-    # EI heatmap
+    # Visualization-only EI heatmap
     ax1 = fig.add_subplot(1, 3, 1)
     im = ax1.contourf(grid_x, grid_y, EI_grid, levels=30)
     plt.colorbar(im, ax=ax1, label="EI")
     ax1.scatter(Z_data[:,0], Z_data[:,1], s=8, alpha=0.12, linewidth=0.0, label="data (encoded)")
+    if Z_cand is not None and Z_cand.shape[0] > 0:
+        ax1.scatter(Z_cand[:,0], Z_cand[:,1], s=18, alpha=0.45, marker="x", label="EI candidates")
     ax1.scatter(Z_obs[:,0], Z_obs[:,1], c="white", s=40, edgecolor="black", label="evaluated z")
     ax1.scatter([z_next[0]], [z_next[1]], c="red", s=90, marker="*", label="next z")
     ax1.set_title(f"Step {step_idx}: EI in latent space")
@@ -177,6 +180,91 @@ def save_generated_datapoint(gen_dir, step_idx, z_next, x_next, y_next, step_siz
     plt.close()
 
 
+def sample_latent_candidates(n_cand, latent_dim, z_box, proposal_dist, rng):
+    if n_cand <= 0:
+        raise ValueError("--n_cand must be positive.")
+    if latent_dim <= 0:
+        raise ValueError("latent_dim must be positive.")
+    if z_box <= 0:
+        raise ValueError("--z_box must be positive.")
+
+    if proposal_dist == "normal":
+        return rng.standard_normal(size=(n_cand, latent_dim))
+
+    if proposal_dist == "uniform_box":
+        return rng.uniform(-z_box, z_box, size=(n_cand, latent_dim))
+
+    if proposal_dist == "normal_uniform_mixture":
+        n_uniform = n_cand // 3
+        n_normal = n_cand - n_uniform
+        parts = [rng.standard_normal(size=(n_normal, latent_dim))]
+        if n_uniform > 0:
+            parts.append(rng.uniform(-z_box, z_box, size=(n_uniform, latent_dim)))
+        return np.vstack(parts)
+
+    if proposal_dist == "trunc_normal":
+        parts = []
+        n_kept = 0
+        while n_kept < n_cand:
+            batch_n = max(1024, 2 * (n_cand - n_kept))
+            batch = rng.standard_normal(size=(batch_n, latent_dim))
+            keep = batch[np.all(np.abs(batch) <= z_box, axis=1)]
+            if keep.shape[0] > 0:
+                parts.append(keep)
+                n_kept += keep.shape[0]
+        return np.vstack(parts)[:n_cand]
+
+    if proposal_dist == "sobol_box":
+        try:
+            from scipy.stats import qmc
+
+            seed = int(rng.integers(0, np.iinfo(np.uint32).max))
+            sampler = qmc.Sobol(d=latent_dim, scramble=True, seed=seed)
+            m = int(np.ceil(np.log2(n_cand)))
+            unit = sampler.random_base2(m=m)[:n_cand]
+            return -z_box + 2.0 * z_box * unit
+        except Exception:
+            print("[WARN] scipy Sobol unavailable; falling back to uniform_box candidates.")
+            return rng.uniform(-z_box, z_box, size=(n_cand, latent_dim))
+
+    raise ValueError(f"Unknown proposal_dist: {proposal_dist}")
+
+
+def is_non_duplicate(z, Z_obs, duplicate_z_tol):
+    if Z_obs.shape[0] == 0:
+        return True
+    return bool(np.min(np.linalg.norm(Z_obs - z.reshape(1, -1), axis=1)) > duplicate_z_tol)
+
+
+def select_candidate_index(Zcand, ei, Z_obs, duplicate_z_tol, selection_rule, topk_ei, eps_random, rng):
+    score = np.where(np.isfinite(ei), ei, -np.inf)
+    order = np.argsort(score)[::-1]
+    best_idx = int(order[0])
+
+    non_duplicate_order = [
+        int(idx)
+        for idx in order
+        if is_non_duplicate(Zcand[int(idx)], Z_obs, duplicate_z_tol)
+    ]
+    if not non_duplicate_order:
+        return best_idx, True
+
+    if selection_rule == "argmax_ei":
+        return int(non_duplicate_order[0]), False
+
+    if selection_rule == "topk_random":
+        k = min(max(1, int(topk_ei)), len(non_duplicate_order))
+        return int(rng.choice(non_duplicate_order[:k])), False
+
+    if selection_rule == "epsilon_topk":
+        if rng.random() < eps_random:
+            return int(rng.choice(non_duplicate_order)), False
+        k = min(max(1, int(topk_ei)), len(non_duplicate_order))
+        return int(rng.choice(non_duplicate_order[:k])), False
+
+    raise ValueError(f"Unknown selection_rule: {selection_rule}")
+
+
 # =========================
 # Main LSBO
 # =========================
@@ -194,11 +282,20 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
 
     ap.add_argument("--n_init", type=int, default=15)
-    ap.add_argument("--n_steps", type=int, default=60)
+    ap.add_argument("--n_steps", type=int, default=150)
 
     ap.add_argument("--xi", type=float, default=0.08)
-    ap.add_argument("--eps_random", type=float, default=0.20)   # exploration probability
-    ap.add_argument("--topk_ei", type=int, default=30)
+    ap.add_argument("--eps_random", type=float, default=0.0)   # used only by --selection_rule epsilon_topk
+    ap.add_argument("--topk_ei", type=int, default=1)
+    ap.add_argument("--n_cand", type=int, default=200,
+                    help="Latent proposals scored by EI per BO iteration.")
+    ap.add_argument("--selection_rule", type=str, default="argmax_ei",
+                    choices=["argmax_ei", "topk_random", "epsilon_topk"])
+    ap.add_argument("--proposal_dist", type=str, default="trunc_normal",
+                    choices=["trunc_normal", "normal", "uniform_box", "sobol_box", "normal_uniform_mixture"])
+    ap.add_argument("--duplicate_z_tol", type=float, default=1e-6)
+    ap.add_argument("--init_design_path", type=str, default=None,
+                    help="Optional shared initial design .npz containing Z_init, X_init, and y_init.")
 
     ap.add_argument("--z_box", type=float, default=5.0)
     ap.add_argument("--grid_res", type=int, default=140)
@@ -207,7 +304,6 @@ def main():
                 help="How many dataset points to encode+plot in latent space for final_summary.")
     ap.add_argument("--data_scatter_seed", type=int, default=0)
 
-    ap.add_argument("--cand_highd", type=int, default=4000)     # if latent_dim != 2
     ap.add_argument("--diagnostics", action=argparse.BooleanOptionalAction, default=True,
                     help="Export non-invasive toy diagnostics JSON for post-processing.")
     ap.add_argument("--diagnostics_root", type=str, default="results/toy_diagnostics")
@@ -216,8 +312,17 @@ def main():
     ap.add_argument("--diagnostics_background_res", type=int, default=60,
                     help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
     args = ap.parse_args()
+    if args.n_cand <= 0:
+        raise ValueError("--n_cand must be positive.")
+    if args.topk_ei <= 0:
+        raise ValueError("--topk_ei must be positive.")
+    if not (0.0 <= args.eps_random <= 1.0):
+        raise ValueError("--eps_random must lie in [0, 1].")
+    if args.duplicate_z_tol < 0.0:
+        raise ValueError("--duplicate_z_tol must be non-negative.")
 
     set_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device)
 
@@ -228,9 +333,7 @@ def main():
     # Load dataset
     data = np.load(data_npz, allow_pickle=True)
     X = data["X"].astype(np.float64)        # (N,L) radians
-    y_data = data["y"].astype(np.float64)   # oracle at X
     target = data["target"].astype(np.float64)
-    types = data["types"].astype(np.int64)
 
     # Load config params if available
     cfg_json = os.path.join(outdir, "config.json")
@@ -286,42 +389,39 @@ def main():
             seed=args.data_scatter_seed
         )
 
-    # Choose init pool: use the VAE training types if present, else use all
-    if train_types is not None:
-        allowed = sorted({int(c) for c in str(train_types)})
-        mask = np.isin(types, allowed)
-        pool_idx = np.where(mask)[0]
-        print("Init pool types:", allowed, "pool size:", len(pool_idx))
+    # Initial observations are expensive oracle calls. For final cross-method
+    # comparisons, provide the same --init_design_path to every method.
+    if args.init_design_path is not None:
+        assert os.path.exists(args.init_design_path), f"Missing init design at {args.init_design_path}"
+        init_data = np.load(args.init_design_path, allow_pickle=False)
+        for key in ("Z_init", "X_init", "y_init"):
+            if key not in init_data:
+                raise KeyError(f"{args.init_design_path} must contain {key}")
+        Z_obs = init_data["Z_init"].astype(float)
+        X_init = init_data["X_init"].astype(float)
+        y_obs = init_data["y_init"].astype(float).reshape(-1)
+        if Z_obs.ndim != 2 or Z_obs.shape[1] != latent_dim:
+            raise ValueError(f"Z_init must have shape (n, {latent_dim})")
+        if X_init.ndim != 2 or X_init.shape[1] != L:
+            raise ValueError(f"X_init must have shape (n, {L})")
+        if Z_obs.shape[0] != X_init.shape[0] or y_obs.shape[0] != Z_obs.shape[0]:
+            raise ValueError("Z_init, X_init, and y_init must have the same length")
+        x_obs = [x.copy() for x in X_init]
+        print(f"[INIT] loaded shared initial design: {args.init_design_path}")
     else:
-        pool_idx = np.arange(len(X))
+        print("[WARN] Using fallback random LSBO initialization. Use --init_design_path for final cross-method comparisons.")
+        Z_init, x_obs, y_init = [], [], []
+        for _ in range(args.n_init):
+            z0 = rng.standard_normal(latent_dim)
+            x0 = decode_z_to_delta_theta(vae, z0, device)
+            y0 = oracle_f(x0, target, step_size, w_close, w_smooth)
+            Z_init.append(z0); x_obs.append(x0); y_init.append(y0)
+        Z_obs = np.asarray(Z_init, dtype=float)
+        y_obs = np.asarray(y_init, dtype=float)
 
-    # ----- Initialize Z_obs from top oracle examples in pool
-    # (but evaluate y via decode(mu(x)) to stay consistent)
-    top_pool = pool_idx[np.argsort(y_data[pool_idx])[-max(args.n_init * 8, 200):]]  # get a decent top set
-    init_idx = top_pool[np.argsort(y_data[top_pool])[-args.n_init:]]
-
-    Z_obs, y_obs, x_obs = [], [], []
-    #for idx in init_idx:
-    #    x = X[idx]
-    #    z_mu = encode_x_to_zmu(vae, x, device)
-    #    x_dec = decode_z_to_delta_theta(vae, z_mu, device)
-    #    y_dec = oracle_f(x_dec, target, step_size, w_close, w_smooth)
-    #
-    #    Z_obs.append(z_mu)
-    #    x_obs.append(x_dec)
-    #    y_obs.append(y_dec)
-
-    # Add a few random z init points too (helps exploration)
-    #n_rand_init = max(3, args.n_init // 5)
-    n_rand_init = args.n_init
-    for _ in range(n_rand_init):
-        z0 = np.random.randn(latent_dim)
-        x0 = decode_z_to_delta_theta(vae, z0, device)
-        y0 = oracle_f(x0, target, step_size, w_close, w_smooth)
-        Z_obs.append(z0); x_obs.append(x0); y_obs.append(y0)
-
-    Z_obs = np.array(Z_obs, dtype=float)
-    y_obs = np.array(y_obs, dtype=float)
+    n_init_actual = int(Z_obs.shape[0])
+    if n_init_actual <= 0:
+        raise ValueError("Initial design must contain at least one observation.")
     if diagnostics is not None:
         diagnostics.set_initial_observations(Z_obs, y_obs, np.asarray(x_obs, dtype=float))
 
@@ -348,45 +448,47 @@ def main():
         proposal_latents = None
         proposal_acquisition_values = None
 
-        # ---- Propose z_next
+        # ---- Propose z_next.
+        # Internal proposal/EI evaluations are optimizer work, not oracle calls.
+        # This benchmark is fair in oracle budget, not necessarily wall-clock time.
+        grid_x = grid_y = EI_grid = None
         if latent_dim == 2:
-            # Grid EI for visualization
+            # Grid EI is visualization-only; the selected point comes from M proposals below.
             z1 = np.linspace(-args.z_box, args.z_box, args.grid_res)
             z2 = np.linspace(-args.z_box, args.z_box, args.grid_res)
             grid_x, grid_y = np.meshgrid(z1, z2)
             Z_grid = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)
 
-            mu, std = gp.predict(Z_grid, return_std=True)
-            ei = expected_improvement(mu, std, best_y=best_y, xi=args.xi)
-            EI_grid = ei.reshape(args.grid_res, args.grid_res)
-            proposal_latents = Z_grid
-            proposal_acquisition_values = ei
+            mu_grid, std_grid = gp.predict(Z_grid, return_std=True)
+            EI_grid = expected_improvement(mu_grid, std_grid, best_y=best_y, xi=args.xi).reshape(args.grid_res, args.grid_res)
 
-            # epsilon-greedy + top-k EI sampling
-            if np.random.rand() < args.eps_random or np.std(ei) < 1e-12:
-                z_next = np.random.uniform(-args.z_box, args.z_box, size=(2,))
-            else:
-                k = min(args.topk_ei, len(ei))
-                topk = np.argpartition(ei, -k)[-k:]
-                z_next = Z_grid[np.random.choice(topk)]
+        Zcand = sample_latent_candidates(
+            n_cand=args.n_cand,
+            latent_dim=latent_dim,
+            z_box=args.z_box,
+            proposal_dist=args.proposal_dist,
+            rng=rng,
+        )
+        mu_cand, std_cand = gp.predict(Zcand, return_std=True)
+        ei_cand = expected_improvement(mu_cand, std_cand, best_y=best_y, xi=args.xi)
+        proposal_latents = Zcand
+        proposal_acquisition_values = ei_cand
 
-        else:
-            # High-dim: sample candidates and pick best EI
-            if np.random.rand() < args.eps_random:
-                z_next = np.random.randn(latent_dim)
-            else:
-                # mixture: normal + uniform
-                Zcand = np.random.randn(args.cand_highd, latent_dim)
-                Zcand2 = np.random.uniform(-args.z_box, args.z_box, size=(args.cand_highd // 2, latent_dim))
-                Zcand = np.vstack([Zcand, Zcand2])
-
-                mu, std = gp.predict(Zcand, return_std=True)
-                ei = expected_improvement(mu, std, best_y=best_y, xi=args.xi)
-                proposal_latents = Zcand
-                proposal_acquisition_values = ei
-                z_next = Zcand[int(np.argmax(ei))]
-
-            grid_x = grid_y = EI_grid = None  # no 2D plot
+        pick_idx, duplicate_fallback = select_candidate_index(
+            Zcand=Zcand,
+            ei=ei_cand,
+            Z_obs=Z_obs,
+            duplicate_z_tol=args.duplicate_z_tol,
+            selection_rule=args.selection_rule,
+            topk_ei=args.topk_ei,
+            eps_random=args.eps_random,
+            rng=rng,
+        )
+        z_next = Zcand[pick_idx]
+        selected_ei = float(ei_cand[pick_idx])
+        max_ei = float(np.max(ei_cand))
+        if duplicate_fallback:
+            print(f"[WARN] step {t}: all candidates were within duplicate_z_tol; using max-EI duplicate fallback.")
 
         # ---- Evaluate oracle at decode(z_next)
         x_next = decode_z_to_delta_theta(vae, z_next, device)
@@ -420,7 +522,15 @@ def main():
                 incumbent_best_sequence=np.asarray(x_obs[best_idx_diag], dtype=float),
                 proposal_latents=proposal_latents,
                 proposal_acquisition_values=proposal_acquisition_values,
-                extra={"selection_acquisition": "expected_improvement"},
+                extra={
+                    "selection_acquisition": "expected_improvement",
+                    "selection_rule": args.selection_rule,
+                    "proposal_dist": args.proposal_dist,
+                    "duplicate_fallback": bool(duplicate_fallback),
+                    "selected_ei": selected_ei,
+                    "max_ei": max_ei,
+                    "n_cand": int(proposal_latents.shape[0]) if proposal_latents is not None else 0,
+                },
             )
 
         if t == 1 or t % 5 == 0:
@@ -435,6 +545,7 @@ def main():
                 Z_data=Z_data,
                 grid_x=grid_x, grid_y=grid_y, EI_grid=EI_grid,
                 Z_obs=Z_obs, y_obs=y_obs, z_next=z_next,
+                Z_cand=proposal_latents,
                 x_next=x_next, y_next=y_next,
                 best_so_far=best_so_far,
                 step_size=step_size
@@ -442,19 +553,22 @@ def main():
 
     # ----- Save trace
     trace_path = os.path.join(plot_root, "bo_trace.npz")
+    oracle_calls = np.arange(n_init_actual, n_init_actual + args.n_steps + 1)
     np.savez_compressed(
         trace_path,
         Z_obs=Z_obs,
         y_obs=y_obs,
         best_so_far=np.array(best_so_far, dtype=float),
+        oracle_calls=oracle_calls,
     )
 
     best_idx = int(np.argmax(y_obs))
     z_best = Z_obs[best_idx]
-    x_best = decode_z_to_delta_theta(vae, z_best, device)
-    y_best = float(oracle_f(x_best, target, step_size, w_close, w_smooth))
+    x_best = np.asarray(x_obs[best_idx], dtype=float)
+    y_best = float(y_obs[best_idx])
 
     # Final summary plot (only if 2D latent)
+    final_png = None
     if latent_dim == 2:
         Z_data = encode_dataset_to_z(
             vae, X, device,
@@ -471,7 +585,8 @@ def main():
             step_size=step_size
         )
 
-    print("Saved final summary:", os.path.abspath(final_png))
+    if final_png is not None:
+        print("Saved final summary:", os.path.abspath(final_png))
     if diagnostics is not None:
         diagnostics_path = diagnostics.finalize(
             extra_summary={

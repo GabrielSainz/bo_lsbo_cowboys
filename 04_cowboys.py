@@ -165,6 +165,41 @@ def pcn_sample_candidates(
     accept_rate = accepted / max(1, n_steps)
     return samples, chain, acq_chain, accept_rate, beta_trace
 
+
+def split_candidate_budget(n_cand: int, n_chains: int) -> list[int]:
+    """Split a total retained-candidate budget as evenly as possible."""
+    if n_cand <= 0:
+        raise ValueError("--n_cand must be positive when provided.")
+    if n_chains <= 0:
+        raise ValueError("--n_chains must be positive.")
+    if n_chains > n_cand:
+        raise ValueError("--n_chains cannot exceed --n_cand.")
+    base = n_cand // n_chains
+    rem = n_cand % n_chains
+    return [base + (1 if i < rem else 0) for i in range(n_chains)]
+
+
+def choose_chain_start(chain_idx: int, chain_init: str, z_best: np.ndarray, latent_dim: int, rng: np.random.Generator):
+    if chain_init == "best":
+        return z_best.copy()
+    if chain_init == "prior":
+        return rng.standard_normal(latent_dim)
+    if chain_init == "mixed":
+        return z_best.copy() if chain_idx == 0 else rng.standard_normal(latent_dim)
+    raise ValueError("--chain_init must be one of: best, prior, mixed")
+
+
+def concat_chains_for_plot(chains: list[np.ndarray], latent_dim: int) -> np.ndarray:
+    nonempty = [c for c in chains if c.shape[0] > 0]
+    if not nonempty:
+        return np.zeros((0, latent_dim))
+    pieces = []
+    for i, chain in enumerate(nonempty):
+        if i > 0:
+            pieces.append(np.full((1, latent_dim), np.nan))
+        pieces.append(chain)
+    return np.vstack(pieces)
+
 # =========================
 # Visualizations
 # =========================
@@ -283,6 +318,12 @@ def main():
     ap.add_argument("--xi", type=float, default=0.00)     # EI/PI margin (use 0.0 to match threshold f*)
 
     # pCN parameters (sampling in latent)
+    ap.add_argument("--n_cand", type=int, default=None,
+                    help="Total retained pCN candidates per BO iteration. If omitted, --pcn_steps controls each chain.")
+    ap.add_argument("--n_chains", type=int, default=1,
+                    help="Number of independent pCN chains to run per BO iteration.")
+    ap.add_argument("--chain_init", type=str, default="best", choices=["best", "prior", "mixed"],
+                    help="How to initialize pCN chains: all at incumbent best, all from prior, or first best plus prior starts.")
     ap.add_argument("--pcn_steps", type=int, default=2500)
     ap.add_argument("--pcn_burn", type=int, default=800)
     ap.add_argument("--pcn_thin", type=int, default=10)
@@ -310,6 +351,10 @@ def main():
                     help="2D latent grid resolution for diagnostic-only oracle background; 0 disables it.")
 
     args = ap.parse_args()
+    if args.n_cand is not None:
+        split_candidate_budget(args.n_cand, args.n_chains)
+    if args.pcn_burn < 0 or args.pcn_thin <= 0 or args.pcn_steps <= 0:
+        raise ValueError("--pcn_burn >= 0, --pcn_thin > 0, and --pcn_steps > 0 are required.")
     set_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
@@ -475,27 +520,65 @@ def main():
         # This is achieved by calling pcn_sample_candidates with acq_name="pi"
         # on the "decoded GP" wrapper.
         # ============================================================
-        pcn_res = pcn_sample_candidates(
-            gp=gp_decoded,
-            acq_name="pi",          # IMPORTANT: match COWBOYS conditioning event via PI
-            best_y=best_y,
-            xi=args.xi,             # threshold margin (0.0 -> strict f*)
-            kappa=args.kappa,       # unused for PI, but keep signature
-            z0=z_best,
-            n_steps=args.pcn_steps,
-            burn=args.pcn_burn,
-            thin=args.pcn_thin,
-            beta=args.pcn_beta,
-            tau=args.tau,
-            rng=rng,
-            adapt_beta=args.adapt_beta,
-            beta_target=args.beta_target,
+        if args.n_cand is None:
+            cand_counts = [
+                max(0, (int(args.pcn_steps) - int(args.pcn_burn)) // int(args.pcn_thin))
+                for _ in range(args.n_chains)
+            ]
+        else:
+            cand_counts = split_candidate_budget(int(args.n_cand), int(args.n_chains))
+
+        cand_parts = []
+        chain_parts = []
+        acc_rates = []
+        chain_steps = []
+        for chain_idx, chain_n_cand in enumerate(cand_counts):
+            if chain_n_cand <= 0:
+                continue
+            chain_steps_i = (
+                int(args.pcn_steps)
+                if args.n_cand is None
+                else int(args.pcn_burn) + int(chain_n_cand) * int(args.pcn_thin)
+            )
+            z0_chain = choose_chain_start(chain_idx, args.chain_init, z_best, latent_dim, rng)
+            pcn_res = pcn_sample_candidates(
+                gp=gp_decoded,
+                acq_name="pi",          # IMPORTANT: match COWBOYS conditioning event via PI
+                best_y=best_y,
+                xi=args.xi,             # threshold margin (0.0 -> strict f*)
+                kappa=args.kappa,       # unused for PI, but keep signature
+                z0=z0_chain,
+                n_steps=chain_steps_i,
+                burn=args.pcn_burn,
+                thin=args.pcn_thin,
+                beta=args.pcn_beta,
+                tau=args.tau,
+                rng=rng,
+                adapt_beta=args.adapt_beta,
+                beta_target=args.beta_target,
+            )
+            cand_chain, chain_i, _acq_chain, acc_rate_i = pcn_res[:4]
+            cand_parts.append(cand_chain)
+            chain_parts.append(chain_i)
+            acc_rates.append(float(acc_rate_i))
+            chain_steps.append(chain_steps_i)
+
+        cand_mcmc = (
+            np.vstack([c for c in cand_parts if c.shape[0] > 0])
+            if any(c.shape[0] > 0 for c in cand_parts)
+            else np.zeros((0, latent_dim))
         )
-        cand_mcmc, chain, acq_chain, acc_rate = pcn_res[:4]
+        chain = concat_chains_for_plot(chain_parts, latent_dim)
+        acc_rate = (
+            float(np.average(acc_rates, weights=chain_steps))
+            if len(acc_rates) > 0
+            else 0.0
+        )
 
         # If pCN yields no samples (can happen with extreme settings), fallback to random prior draws.
         if cand_mcmc.shape[0] == 0:
-            cand_mcmc = rng.standard_normal(size=(max(10, args.fallback_random_tries), latent_dim))
+            fallback_n = int(args.n_cand) if args.n_cand is not None else max(10, args.fallback_random_tries)
+            cand_mcmc = rng.standard_normal(size=(fallback_n, latent_dim))
 
         # ---- Choose the next point from the pCN sample set using a "utility" (paper uses qEI for batches)
         # For batch=1, EI is the classic choice.
@@ -538,6 +621,9 @@ def main():
                 proposal_sequences=X_cand,
                 extra={
                     "accept_rate": acc_rate,
+                    "n_cand": int(cand_mcmc.shape[0]),
+                    "n_chains": int(args.n_chains),
+                    "chain_init": args.chain_init,
                     "selection_acquisition": args.acq,
                     "sampler": "pcn_pi_tilt",
                 },

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
+# Sweep COWBOYS flow-latent local/global proposal settings on one seed.
 # Example:
-#   chmod +x run_09_cowboys_flow_latent_diagnostics.sh
-#   SEEDS="1 2 3 4 5" M=200 ./run_09_cowboys_flow_latent_diagnostics.sh
+#   chmod +x run_09_cowboys_flow_latent_proposal_sweep.sh
+#   SEED=1 M=200 ./run_09_cowboys_flow_latent_proposal_sweep.sh
 set -euo pipefail
 
 outdir="${OUTDIR:-toy_circle_data}"
 runs_root="${RUNS_ROOT:-results/toy_runs}"
-diagnostics_root="${DIAGNOSTICS_ROOT:-results/toy_diagnostics_main}"
+diagnostics_root="${DIAGNOSTICS_ROOT:-results/toy_diagnostics_sweeps}"
 
-read -r -a seeds <<< "${SEEDS:-1 2 3 4 5}"
-
+seed="${SEED:-1}"
 n_steps="${N_STEPS:-150}"
 n_init="${N_INIT:-15}"
 candidate_budget="${M:-200}"
@@ -19,29 +19,41 @@ select_acq="${SELECT_ACQ:-pi}"
 plot_acq="${PLOT_ACQ:-pi}"
 xi="${XI:-0.06}"
 kappa="${KAPPA:-2.2}"
-beta_tilt="${BETA_TILT:-1.0}"
-tau_temp="${TAU_TEMP:-0.1}"
 mh_burn="${MH_BURN:-0}"
 mh_thin="${MH_THIN:-1}"
 mh_steps="${MH_STEPS:-$(( mh_burn + candidate_budget * mh_thin ))}"
-lambda_local="${LAMBDA_LOCAL:-0.45}"
-sigma_local="${SIGMA_LOCAL:-0.2}"
-pool_prior="${POOL_PRIOR:-64}"
 pool_replay="${POOL_REPLAY:-256}"
-pool_local="${POOL_LOCAL:-256}"
-pool_local_scale="${POOL_LOCAL_SCALE:-0.12}"
 flow_train_steps="${FLOW_TRAIN_STEPS:-250}"
 grid_res="${GRID_RES:-110}"
 diagnostics_top_k="${DIAGNOSTICS_TOP_K:-10}"
 diagnostics_z_box="${DIAGNOSTICS_Z_BOX:-5}"
 diagnostics_background_res="${DIAGNOSTICS_BACKGROUND_RES:-60}"
 
-for seed in "${seeds[@]}"; do
-  tag="${weight}_bt${beta_tilt}_tau${tau_temp}_init${init_mode}_m${candidate_budget}_mh${mh_steps}"
-  plotroot="${runs_root}/cowboys_flow_latent/${tag}/seed_${seed}"
+# label:lambda_local:sigma_local:pool_prior:pool_local:pool_local_scale:beta_tilt:tau_temp
+# lambda_local controls MH local proposals; 1-lambda_local controls global flow proposals.
+# pool_prior / pool_local / pool_local_scale control how global flow training sees broad vs local mass.
+configs=(
+  "global_flow_only:0.00:0.20:128:128:0.12:1.0:0.10"
+  "mostly_global_tight:0.15:0.12:128:256:0.10:1.0:0.10"
+  "mostly_global_wide:0.15:0.35:128:256:0.20:1.0:0.10"
+  "balanced_tight:0.35:0.12:64:256:0.10:1.0:0.10"
+  "balanced_base:0.45:0.20:64:256:0.12:1.0:0.10"
+  "balanced_wide:0.45:0.35:64:256:0.25:1.0:0.10"
+  "mostly_local_tight:0.70:0.12:32:384:0.10:1.0:0.10"
+  "mostly_local_wide:0.70:0.35:32:384:0.25:1.0:0.10"
+  "local_only_tight:1.00:0.12:0:512:0.10:1.0:0.10"
+  "local_only_wide:1.00:0.45:0:512:0.30:1.0:0.10"
+  "sharp_global:0.20:0.20:128:256:0.12:2.0:0.05"
+  "soft_global:0.20:0.20:128:256:0.12:0.5:0.20"
+)
+
+for cfg in "${configs[@]}"; do
+  IFS=: read -r label lambda_local sigma_local pool_prior pool_local pool_local_scale beta_tilt tau_temp <<< "$cfg"
+  tag="${label}_${weight}_bt${beta_tilt}_tau${tau_temp}_lam${lambda_local}_sig${sigma_local}_m${candidate_budget}_mh${mh_steps}"
+  plotroot="${runs_root}/cowboys_flow_latent_proposal_sweep/${tag}/seed_${seed}"
   mkdir -p "$plotroot"
 
-  echo "=== COWBOYS flow latent seed=${seed} ${tag} ==="
+  echo "=== COWBOYS flow proposal sweep seed=${seed} ${tag} ==="
   python -u 09_cowboys_flow_latent.py \
     --outdir "$outdir" \
     --plotroot "$plotroot" \

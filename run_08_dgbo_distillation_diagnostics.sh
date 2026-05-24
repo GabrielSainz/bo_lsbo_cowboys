@@ -30,7 +30,7 @@ diagnostics_background_res="${DIAGNOSTICS_BACKGROUND_RES:-60}"
 
 for seed in "${seeds[@]}"; do
   tag="${guide_mode}_tau${tau_guidance}_gs${guidance_scale}_clip${clip_guidance}_cand${n_cand}"
-  plotroot="${runs_root}/dgbo_latent_diffusion_distillation/${tag}/seed_${seed}"
+  plotroot="${runs_root}/dgbo_dist/${tag}/seed_${seed}"
   mkdir -p "$plotroot"
 
   echo "=== DGBO distillation seed=${seed} ${tag} ==="
