@@ -1,8 +1,8 @@
 """Compare DGBO variants with matched guidance configurations.
 
-This plotter is intended for the dgbo_variants folder where normal DGBO and
-distillation runs share guidance settings. Curves are colored by method, while
-marker/line style identifies the guidance configuration.
+This plotter is intended for the dgbo_variants folder where normal DGBO,
+distillation, and REINFORCE runs share guidance settings. Curves are colored by
+method, while marker/line style identifies the guidance configuration.
 """
 
 import argparse
@@ -29,11 +29,14 @@ METHOD_LABELS = {
     "dgbo": "DGBO",
     "dgbo_dist": "DGBO Distill",
     "dgbo_distillation": "DGBO Distill",
+    "dgbo_latent_diffusion_reinforce": "DGBO REINFORCE",
+    "dgbo_reinforce": "DGBO REINFORCE",
 }
 
 METHOD_COLORS = {
     "DGBO": "#1f77b4",
     "DGBO Distill": "#d62728",
+    "DGBO REINFORCE": "#2ca02c",
 }
 
 CONFIG_LABELS = {
@@ -76,7 +79,7 @@ def finite_float(value):
 
 def canonical_run_id(run_id):
     text = str(run_id or "")
-    for prefix in ("distill_", "real_"):
+    for prefix in ("distill_", "real_", "reinf_"):
         if text.startswith(prefix):
             text = text[len(prefix):]
     text = text.replace("stro_default", "strong_default")
@@ -227,13 +230,18 @@ def load_runs(diagnostics_root, method_dir):
     return runs
 
 
-def matched_groups(runs, exclude_labels=None):
+def matched_groups(runs, exclude_labels=None, include_labels=None):
     exclude_labels = set(exclude_labels or [])
+    include_labels = set(include_labels or [])
+    required_methods = {"DGBO", "DGBO Distill", "DGBO REINFORCE"}
     grouped = defaultdict(list)
     methods_by_config = defaultdict(set)
     for run in runs:
         variant = run["_variant"]
-        if variant["config_key"][0] in exclude_labels:
+        label = variant["config_key"][0]
+        if label in exclude_labels:
+            continue
+        if include_labels and label not in include_labels:
             continue
         key = (variant["method"], variant["config_key"])
         grouped[key].append(run)
@@ -242,7 +250,7 @@ def matched_groups(runs, exclude_labels=None):
     matched_configs = {
         config_key
         for config_key, methods in methods_by_config.items()
-        if {"DGBO", "DGBO Distill"}.issubset(methods)
+        if required_methods.issubset(methods)
     }
     filtered = {
         key: value
@@ -252,16 +260,45 @@ def matched_groups(runs, exclude_labels=None):
     return filtered, sorted(matched_configs, key=config_sort_key)
 
 
-def plot_comparison(grouped, ordered_configs, save_path, bin_size=10, tight_diagnostic_y=False):
+def plot_comparison(
+    grouped,
+    ordered_configs,
+    save_path,
+    bin_size=10,
+    tight_diagnostic_y=False,
+    thesis=False,
+    no_main_title=False,
+):
     if not grouped:
-        raise SystemExit("No matched DGBO/DGBO-distillation diagnostics found.")
+        raise SystemExit("No matched DGBO/DGBO-distillation/DGBO-REINFORCE diagnostics found.")
 
-    fig, axes = plt.subplots(1, 3, figsize=(19.0, 5.2), squeeze=False)
+    if thesis:
+        plt.rcParams.update(
+            {
+                "font.size": 13,
+                "axes.titlesize": 17,
+                "axes.labelsize": 15,
+                "xtick.labelsize": 12,
+                "ytick.labelsize": 12,
+                "legend.fontsize": 12,
+            }
+        )
+    title_fs = 17 if thesis else None
+    label_fs = 15 if thesis else None
+    legend_fs = 12 if thesis else 8.2
+    line_width = 2.7 if thesis else 2.25
+    marker_size = 5.0 if thesis else 4.2
+
+    fig_height = 5.9 if thesis else 5.2
+    fig, axes = plt.subplots(1, 3, figsize=(19.0, fig_height), squeeze=False)
     axes = axes[0]
     legend_handles = []
     legend_labels = []
+    legend_keys = []
 
-    methods = ["DGBO", "DGBO Distill"]
+    methods = ["DGBO", "DGBO Distill", "DGBO REINFORCE"]
+    method_pos = {method: i for i, method in enumerate(methods)}
+    config_pos = {config_key: i for i, config_key in enumerate(ordered_configs)}
     for ax, (metric_key, title) in zip(axes, METRICS):
         axis_values = []
         for config_key in ordered_configs:
@@ -283,9 +320,9 @@ def plot_comparison(grouped, ordered_configs, save_path, bin_size=10, tight_diag
                     mean,
                     color=color,
                     linestyle=linestyle,
-                    linewidth=2.25,
+                    linewidth=line_width,
                     marker=marker,
-                    markersize=4.2,
+                    markersize=marker_size,
                     markevery=max(1, len(x) // 12),
                     label=line_label,
                 )
@@ -302,6 +339,7 @@ def plot_comparison(grouped, ordered_configs, save_path, bin_size=10, tight_diag
                 if metric_key == METRICS[0][0]:
                     legend_handles.append(line)
                     legend_labels.append(line_label)
+                    legend_keys.append((method_pos.get(method, 99), config_pos.get(config_key, 99)))
 
         low_q, high_q = 0.03, 0.97
         if tight_diagnostic_y and metric_key != "best_so_far_objective":
@@ -320,31 +358,44 @@ def plot_comparison(grouped, ordered_configs, save_path, bin_size=10, tight_diag
                     fontsize=8,
                     color="0.35",
                 )
-        ax.set_title(title)
-        ax.set_xlabel("BO iteration")
+        ax.set_title(title, fontsize=title_fs)
+        ax.set_xlabel("BO iteration", fontsize=label_fs)
+        if thesis:
+            ax.tick_params(axis="both", labelsize=12)
         ax.grid(True, alpha=0.25)
-    axes[0].set_ylabel("metric value")
+    axes[0].set_ylabel("metric value", fontsize=label_fs)
 
     if legend_handles:
+        order = sorted(range(len(legend_handles)), key=lambda i: legend_keys[i])
         fig.legend(
-            legend_handles,
-            legend_labels,
+            [legend_handles[i] for i in order],
+            [legend_labels[i] for i in order],
             loc="lower center",
-            ncol=4,
+            ncol=3,
             frameon=True,
-            fontsize=8.4,
-            bbox_to_anchor=(0.5, -0.035),
+            fontsize=legend_fs,
+            bbox_to_anchor=(0.5, -0.055 if thesis else -0.075),
+            handlelength=2.5,
+            columnspacing=1.35,
         )
 
-    subtitle = "color = method; line style/marker = matched guidance configuration"
-    if bin_size > 1:
-        subtitle += f"; plotted in {bin_size}-iteration bins"
-    if tight_diagnostic_y:
-        subtitle += "; tighter diagnostic y-scale"
-    fig.suptitle(f"DGBO variant comparison\n{subtitle}", fontsize=13)
-    fig.tight_layout(rect=(0.0, 0.15, 1.0, 0.90))
+    if not no_main_title:
+        subtitle = "color = method; line style/marker = matched guidance configuration"
+        if bin_size > 1:
+            subtitle += f"; plotted in {bin_size}-iteration bins"
+        if tight_diagnostic_y:
+            subtitle += "; tighter diagnostic y-scale"
+        fig.suptitle(f"DGBO variant comparison\n{subtitle}", fontsize=15 if thesis else 13)
+        fig.tight_layout(rect=(0.0, 0.20, 1.0, 0.90))
+    else:
+        fig.tight_layout(rect=(0.0, 0.20, 1.0, 0.98))
     ensure_dir(os.path.dirname(save_path))
-    fig.savefig(windows_long_path(save_path), dpi=190)
+    fig.savefig(
+        windows_long_path(save_path),
+        dpi=300 if thesis else 190,
+        bbox_inches="tight",
+        pad_inches=0.08,
+    )
     plt.close(fig)
 
 
@@ -357,6 +408,14 @@ def main():
     ap.add_argument("--save_path", type=str, default=None)
     ap.add_argument("--bin_size", type=int, default=10)
     ap.add_argument("--tight_diagnostic_y", action="store_true")
+    ap.add_argument("--thesis", action="store_true", help="Use larger thesis-style text and export settings.")
+    ap.add_argument("--no_main_title", action="store_true", help="Omit the figure-level title/subtitle.")
+    ap.add_argument(
+        "--include_labels",
+        type=str,
+        default="",
+        help="Comma-separated guidance labels to keep, e.g. soft_clipped,base_mid_clip.",
+    )
     ap.add_argument(
         "--exclude_labels",
         type=str,
@@ -367,7 +426,12 @@ def main():
 
     runs = load_runs(args.diagnostics_root, args.method_dir)
     exclude_labels = [part.strip() for part in args.exclude_labels.split(",") if part.strip()]
-    grouped, ordered_configs = matched_groups(runs, exclude_labels=exclude_labels)
+    include_labels = [part.strip() for part in args.include_labels.split(",") if part.strip()]
+    grouped, ordered_configs = matched_groups(
+        runs,
+        exclude_labels=exclude_labels,
+        include_labels=include_labels,
+    )
     if args.save_path is None:
         name = "dgbo_variants_method_comparison.png"
         if args.tight_diagnostic_y:
@@ -380,6 +444,8 @@ def main():
         save_path=args.save_path,
         bin_size=args.bin_size,
         tight_diagnostic_y=args.tight_diagnostic_y,
+        thesis=args.thesis,
+        no_main_title=args.no_main_title,
     )
 
     n_runs = sum(len(items) for items in grouped.values())
