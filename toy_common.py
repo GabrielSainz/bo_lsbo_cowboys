@@ -23,9 +23,21 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def windows_long_path(path):
+    """Return a Windows extended-length path when needed."""
+    path = os.path.abspath(os.fspath(path))
+    if os.name != "nt":
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
 def ensure_dir(path):
     """Create directory if it does not exist."""
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(windows_long_path(path), exist_ok=True)
 
 
 def natural_key(s):

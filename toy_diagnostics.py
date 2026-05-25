@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 
-from toy_common import ensure_dir, turtle_path
+from toy_common import ensure_dir, turtle_path, windows_long_path
 
 
 MetricFn = Callable[[np.ndarray], float]
@@ -482,14 +482,14 @@ class ToyDiagnosticsLogger:
             payload["summary"] = json_safe(extra_summary)
 
         path = os.path.join(self.run_dir, "metrics.json")
-        with open(path, "w", encoding="utf-8") as f:
+        with open(windows_long_path(path), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
         self._write_metric_csv(os.path.join(self.run_dir, "metric_series.csv"))
         return path
 
     def _write_metric_csv(self, path: str) -> None:
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        with open(windows_long_path(path), "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(METRIC_KEYS)
             n = len(self.metric_series["bo_iteration"])

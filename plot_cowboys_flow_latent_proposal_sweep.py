@@ -41,6 +41,14 @@ SHORT_LABELS = {
     "local_only_wide": "local wide",
 }
 
+REPRESENTATIVE_LABELS = [
+    "global_flow_only",
+    "soft_global",
+    "balanced_base",
+    "mostly_local_tight",
+    "local_only_tight",
+]
+
 LABEL_RANK = {
     "global_flow_only": 0,
     "mostly_global_tight": 1,
@@ -338,7 +346,7 @@ def group_runs(json_runs, csv_runs):
     return grouped, info_by_tag
 
 
-def plot_sweep(grouped, info_by_tag, save_path, bin_size=10, robust_y=True):
+def plot_sweep(grouped, info_by_tag, save_path, bin_size=10, robust_y=True, title_note=""):
     ordered_tags = sorted(grouped, key=lambda tag: sort_key(info_by_tag[tag]))
     if not ordered_tags:
         raise SystemExit("No COWBOYS flow proposal-sweep diagnostics found.")
@@ -434,10 +442,13 @@ def plot_sweep(grouped, info_by_tag, save_path, bin_size=10, robust_y=True):
             bbox_to_anchor=(0.5, -0.015),
         )
 
+    title = "COWBOYS Flow proposal sweep diagnostics"
+    if title_note:
+        title += f" ({title_note})"
     subtitle = "global-to-local proposal sweep; darker red = more global, softer red = more local"
     if bin_size > 1:
         subtitle += f"; plotted in {bin_size}-iteration bins"
-    fig.suptitle(f"COWBOYS Flow proposal sweep diagnostics\n{subtitle}", fontsize=13)
+    fig.suptitle(f"{title}\n{subtitle}", fontsize=13)
     fig.tight_layout(rect=(0.0, 0.13, 1.0, 0.90))
     ensure_dir(os.path.dirname(save_path))
     fig.savefig(save_path, dpi=190)
@@ -451,8 +462,12 @@ def main():
     ap.add_argument(
         "--save_path",
         type=str,
-        default="results/toy_runs/cowboys_flow_latent_proposal_sweep/plots/proposal_sweep_diagnostics.png",
+        default=None,
     )
+    ap.add_argument("--preset", type=str, default="all", choices=["all", "representative"],
+                    help="Use all configs or a small global-to-local representative subset.")
+    ap.add_argument("--include_labels", type=str, default="",
+                    help="Comma-separated config labels to plot, e.g. global_flow_only,soft_global.")
     ap.add_argument("--bin_size", type=int, default=10)
     ap.add_argument("--no_csv_fallback", action="store_true",
                     help="Use only finalized diagnostics JSON, not partial metrics.csv best-so-far traces.")
@@ -463,12 +478,42 @@ def main():
     csv_runs = [] if args.no_csv_fallback else load_csv_fallback_runs(args.runs_root)
     grouped, info_by_tag = group_runs(json_runs, csv_runs)
 
+    selected_labels = []
+    title_note = ""
+    if args.include_labels.strip():
+        selected_labels = [part.strip() for part in args.include_labels.split(",") if part.strip()]
+        title_note = "selected"
+    elif args.preset == "representative":
+        selected_labels = REPRESENTATIVE_LABELS
+        title_note = "representative subset"
+
+    if selected_labels:
+        selected = set(selected_labels)
+        grouped = {
+            tag: runs
+            for tag, runs in grouped.items()
+            if info_by_tag[tag].get("label_key") in selected
+        }
+        info_by_tag = {tag: info for tag, info in info_by_tag.items() if tag in grouped}
+
+    if args.save_path is None:
+        filename = "proposal_sweep_diagnostics.png"
+        if args.preset != "all" or args.include_labels.strip():
+            filename = f"proposal_sweep_{args.preset}.png" if not args.include_labels.strip() else "proposal_sweep_selected.png"
+        args.save_path = os.path.join(
+            args.runs_root,
+            "cowboys_flow_latent_proposal_sweep",
+            "plots",
+            filename,
+        )
+
     plot_sweep(
         grouped=grouped,
         info_by_tag=info_by_tag,
         save_path=args.save_path,
         bin_size=args.bin_size,
         robust_y=not args.no_robust_y,
+        title_note=title_note,
     )
 
     n_runs = sum(len(runs) for runs in grouped.values())
