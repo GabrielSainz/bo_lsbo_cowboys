@@ -387,17 +387,13 @@ def reinforce_latent_grad(
     logp = dist.log_prob(x_scaled_samples).sum(dim=1)  # (K,)
 
     x_np = (x_scaled_samples.detach().cpu().numpy() * np.pi).astype(np.float64)
-    logw = []
-    for i in range(k):
-        if weight == "pi":
-            lw = gp_acquisition(gp, x_np[i], best_y=best_y, acq="pi", xi=xi)
-        elif weight == "ei":
-            ei = gp_acquisition(gp, x_np[i], best_y=best_y, acq="ei", xi=xi)
-            lw = float(np.log(max(ei, 1e-12)))
-        else:
-            raise ValueError("weight must be 'pi' or 'ei'")
-        logw.append(lw)
-
+    if weight == "pi":
+        logw = gp_acquisition_values(gp, x_np, best_y=best_y, acq="pi", xi=xi)
+    elif weight == "ei":
+        ei = gp_acquisition_values(gp, x_np, best_y=best_y, acq="ei", xi=xi)
+        logw = np.log(np.maximum(ei, 1e-12))
+    else:
+        raise ValueError("weight must be 'pi' or 'ei'")
     logw = np.asarray(logw, dtype=np.float32)
     logw = np.clip(logw, float(logw_clip_low), float(logw_clip_high))
 
@@ -470,18 +466,15 @@ def reinforce_latent_grad_batch(
     dist = torch.distributions.Normal(loc=mu_rep, scale=sigma)
     logp = dist.log_prob(x_scaled_samples).sum(dim=1).reshape(B, k)
 
-    x_np = (x_scaled_samples.detach().cpu().numpy() * np.pi).astype(np.float64).reshape(B, k, L)
-    logw = np.empty((B, k), dtype=np.float32)
-    for b in range(B):
-        for i in range(k):
-            if weight == "pi":
-                lw = gp_acquisition(gp, x_np[b, i], best_y=best_y, acq="pi", xi=xi)
-            elif weight == "ei":
-                ei = gp_acquisition(gp, x_np[b, i], best_y=best_y, acq="ei", xi=xi)
-                lw = float(np.log(max(ei, 1e-12)))
-            else:
-                raise ValueError("weight must be 'pi' or 'ei'")
-            logw[b, i] = lw
+    x_np = (x_scaled_samples.detach().cpu().numpy() * np.pi).astype(np.float64)
+    if weight == "pi":
+        logw = gp_acquisition_values(gp, x_np, best_y=best_y, acq="pi", xi=xi)
+    elif weight == "ei":
+        ei = gp_acquisition_values(gp, x_np, best_y=best_y, acq="ei", xi=xi)
+        logw = np.log(np.maximum(ei, 1e-12))
+    else:
+        raise ValueError("weight must be 'pi' or 'ei'")
+    logw = np.asarray(logw, dtype=np.float32).reshape(B, k)
 
     logw = np.clip(logw, float(logw_clip_low), float(logw_clip_high))
     if baseline_mode == "mean":

@@ -387,6 +387,8 @@ def plot_sweep(
     tight_diagnostic_y=False,
     diagnostic_low_q=0.10,
     diagnostic_high_q=0.90,
+    no_main_title=False,
+    thesis=False,
 ):
     ordered_tags = sorted(grouped, key=lambda tag: sort_key(info_by_tag[tag]))
     if not ordered_tags:
@@ -397,7 +399,15 @@ def plot_sweep(
         or [1.0]
     )
 
-    fig, axes = plt.subplots(1, 3, figsize=(19.0, 5.2), squeeze=False)
+    fig_size = (18.2, 5.2) if thesis else (19.0, 5.2)
+    title_fs = 16 if thesis else None
+    label_fs = 13 if thesis else None
+    tick_fs = 11 if thesis else None
+    legend_fs = 14 if thesis else 8.4
+    line_width = 2.5 if thesis else 2.25
+    marker_size = 5.0 if thesis else 4.3
+
+    fig, axes = plt.subplots(1, 3, figsize=fig_size, squeeze=False)
     axes = axes[0]
     legend_handles = []
     legend_labels = []
@@ -422,9 +432,9 @@ def plot_sweep(
                 mean,
                 color=color,
                 linestyle=linestyle,
-                linewidth=2.25,
+                linewidth=line_width,
                 marker=marker,
-                markersize=4.3,
+                markersize=marker_size,
                 markevery=markevery,
                 label=label,
             )
@@ -457,7 +467,7 @@ def plot_sweep(
                         transform=ax.transAxes,
                         ha="right",
                         va="bottom",
-                        fontsize=8,
+                        fontsize=9 if thesis else 8,
                         color="0.35",
                     )
         if missing:
@@ -471,38 +481,43 @@ def plot_sweep(
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=8,
+                fontsize=9 if thesis else 8,
                 color="0.35",
                 bbox=dict(facecolor="white", alpha=0.78, edgecolor="0.85", linewidth=0.5),
             )
-        ax.set_title(title)
-        ax.set_xlabel("BO iteration")
+        ax.set_title(title, fontsize=title_fs, pad=10 if thesis else None)
+        ax.set_xlabel("BO iteration", fontsize=label_fs)
+        ax.tick_params(axis="both", labelsize=tick_fs)
         ax.grid(True, alpha=0.25)
-    axes[0].set_ylabel("metric value")
+    axes[0].set_ylabel("metric value", fontsize=label_fs)
 
     if legend_handles:
+        legend_y = 0.035 if thesis else -0.02
         fig.legend(
             legend_handles,
             legend_labels,
             loc="lower center",
             ncol=min(6, len(legend_labels)),
             frameon=True,
-            fontsize=8.4,
-            bbox_to_anchor=(0.5, -0.02),
+            fontsize=legend_fs,
+            bbox_to_anchor=(0.5, legend_y),
         )
 
-    title = "DGBO guidance sweep diagnostics"
-    if title_note:
-        title += f" ({title_note})"
-    subtitle = "darker red = stronger guidance"
-    if bin_size > 1:
-        subtitle += f"; plotted in {bin_size}-iteration bins"
-    if tight_diagnostic_y:
-        subtitle += "; tighter diagnostic y-scale"
-    fig.suptitle(f"{title}\n{subtitle}", fontsize=13)
-    fig.tight_layout(rect=(0.0, 0.13, 1.0, 0.90))
+    if not no_main_title:
+        title = "DGBO guidance sweep diagnostics"
+        if title_note:
+            title += f" ({title_note})"
+        subtitle = "darker red = stronger guidance"
+        if bin_size > 1:
+            subtitle += f"; plotted in {bin_size}-iteration bins"
+        if tight_diagnostic_y:
+            subtitle += "; tighter diagnostic y-scale"
+        fig.suptitle(f"{title}\n{subtitle}", fontsize=13)
+        fig.tight_layout(rect=(0.0, 0.24 if thesis else 0.13, 1.0, 0.90))
+    else:
+        fig.tight_layout(rect=(0.0, 0.30 if thesis else 0.13, 1.0, 0.98))
     ensure_dir(os.path.dirname(save_path))
-    fig.savefig(windows_long_path(save_path), dpi=190)
+    fig.savefig(windows_long_path(save_path), dpi=190, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -538,6 +553,12 @@ def main():
     )
     ap.add_argument("--diagnostic_low_q", type=float, default=0.10)
     ap.add_argument("--diagnostic_high_q", type=float, default=0.90)
+    ap.add_argument("--no_main_title", action="store_true")
+    ap.add_argument(
+        "--thesis",
+        action="store_true",
+        help="Use larger subplot titles, axis labels, ticks, and legend text for thesis figures.",
+    )
     args = ap.parse_args()
 
     runs, skipped = load_json_runs(args.diagnostics_root, args.method_dir)
@@ -583,6 +604,8 @@ def main():
         tight_diagnostic_y=args.tight_diagnostic_y,
         diagnostic_low_q=args.diagnostic_low_q,
         diagnostic_high_q=args.diagnostic_high_q,
+        no_main_title=args.no_main_title,
+        thesis=args.thesis,
     )
 
     n_runs = sum(len(runs_for_tag) for runs_for_tag in grouped.values())
