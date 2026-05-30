@@ -511,7 +511,7 @@ def guided_sample_latent_z0_norm(
 
         mean = (1.0 / torch.sqrt(alpha)) * (z - (beta / torch.sqrt(torch.clamp(1.0 - ab, min=1e-12))) * eps_use)
         ############################ Jus trying - remove
-        noise = torch.zeros_like(z)
+        #noise = torch.zeros_like(z)
         ############################
         z = mean + sigma * noise
 
