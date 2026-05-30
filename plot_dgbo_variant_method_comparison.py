@@ -44,6 +44,7 @@ CONFIG_LABELS = {
     "soft_clipped": "g0.5 soft",
     "base_mid_clip": "g1 base",
     "strong_default": "g2 strong",
+    "very_strong_high_tau": "g4 high-tau",
 }
 
 CONFIG_STYLES = {
@@ -51,6 +52,7 @@ CONFIG_STYLES = {
     "soft_clipped": ("--", "s"),
     "base_mid_clip": ("-", "^"),
     "strong_default": ("-.", "D"),
+    "very_strong_high_tau": (":", "P"),
 }
 
 
@@ -124,6 +126,7 @@ def config_sort_key(item):
         "soft_clipped": 1,
         "base_mid_clip": 2,
         "strong_default": 3,
+        "very_strong_high_tau": 4,
     }
     gs_sort = gs if np.isfinite(gs) else 99.0
     tau_sort = tau if np.isfinite(tau) else 99.0
